@@ -1,0 +1,9 @@
+{
+  "name": "convo-digest",
+  "description": "Summarize your finished Claude Code conversations into a searchable recall index, and surface relevant past work when you start something new. Runs locally on your Claude Code subscription; no API key.",
+  "version": "0.1.0",
+  "author": { "name": "Dan" },
+  "homepage": "https://github.com/pariidanDKE/ClaudeConversationDigest",
+  "repository": "https://github.com/pariidanDKE/ClaudeConversationDigest",
+  "keywords": ["digest", "recall", "summarization", "conversation", "memory", "history"]
+}
