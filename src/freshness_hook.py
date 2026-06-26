@@ -23,6 +23,7 @@ STAMP = os.path.join(DIGEST, "last_nudged_date")   # once/day gate (separate fro
 INDEX = os.path.join(DIGEST, "index.json")
 LOG = os.path.join(DIGEST, "freshness_hook.log")    # ground-truth trace of every fire
 SRC = os.path.dirname(os.path.abspath(__file__))
+INITIALIZED = os.path.join(DIGEST, ".initialized")  # one-time setup marker (/convo-digest:setup writes it)
 BIG_BATCH = 25                                       # above this, suggest draining over days
 
 _SOURCE = "?"  # SessionStart source (startup/resume/clear/compact), read from stdin
@@ -30,6 +31,31 @@ _SOURCE = "?"  # SessionStart source (startup/resume/clear/compact), read from s
 
 def _today() -> str:
     return datetime.now().astimezone().date().isoformat()
+
+
+def _touch(path: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "a", encoding="utf-8").close()
+    except OSError:
+        pass
+
+
+def _initialized() -> bool:
+    """True once first-time setup has run. An existing user who already has a populated
+    index (e.g. upgraded from a pre-setup version) is adopted silently — we stamp the
+    marker and never show onboarding."""
+    if os.path.exists(INITIALIZED):
+        return True
+    try:
+        with open(INDEX, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict) and data:
+            _touch(INITIALIZED)          # adopt existing user
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _log(decision: str, n: object = "") -> None:
@@ -99,6 +125,24 @@ def main() -> None:
                 _emit()
         except OSError:
             pass
+
+    # First run: no index built yet → a friendly welcome that points to the one-time
+    # setup skill, instead of a bulk "N conversations pending" backlog nudge. Once/day
+    # gated (above); /convo-digest:setup writes the .initialized marker to end this.
+    if not _initialized():
+        try:
+            os.makedirs(DIGEST, exist_ok=True)
+            with open(STAMP, "w", encoding="utf-8") as fh:
+                fh.write(today)
+        except OSError:
+            pass
+        _log("welcome (first run)")
+        _emit(
+            "[convo-digest] 👋 First run — the plugin is installed but your recall index "
+            "isn't built yet. Offer the user ONCE, as a friendly one-liner, to run the "
+            "`/convo-digest:setup` skill: it checks the environment and lets them choose "
+            "to summarize past conversations (backfill) or start fresh from now on. If "
+            "they decline or are mid-task, drop it and don't repeat.")
 
     # cheap pending count (never let a hook failure block the session)
     try:
