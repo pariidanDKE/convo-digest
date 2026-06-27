@@ -96,6 +96,34 @@ def ensure_workflow_installed() -> None:
         _log(f"workflow-install error: {e}")
 
 
+def _build_nudge(n: int, m: int) -> str | None:
+    """Compose the single SessionStart nudge from two independent signals:
+      n = finished conversations pending a digest (the fixed last_ts change-detector)
+      m = repos with indexed history but no work/personal profile
+    Both ride in ONE message — digest leads (primary), profiling rides along
+    (secondary) — so the two never compete for the day's nudge and profiling is
+    never starved on busy days. Returns None when there's nothing worth saying."""
+    if n <= 0 and m <= 0:
+        return None
+    parts = []
+    if n > 0:
+        big = " (a large backlog — offer to drain it over several mornings, not all " \
+            "at once)" if n > BIG_BATCH else ""
+        parts.append(
+            f"DIGEST (the important one): {n} finished conversation(s) from earlier "
+            f"aren't in the recall index yet{big}. Offer to run the `digest` skill to "
+            f"summarize them, then `digest-archive` to triage what landed.")
+    if m > 0:
+        parts.append(
+            f"PROFILE (secondary): {m} repo(s) have indexed history but aren't tagged "
+            f"work/personal — recall shows them as 'unknown'. Offer to run "
+            f"`/convo-digest:profile-repos` to label them and sharpen recall.")
+    return (
+        "[convo-digest] " + "  ".join(parts) + "  Present these in a single message "
+        "(lead with the digest if both apply); each is a suggestion offered ONCE — if "
+        "the user declines or is mid-task, drop it and don't repeat.")
+
+
 def main() -> None:
     global _SOURCE
     try:                                  # SessionStart hooks get a JSON payload on stdin
@@ -103,20 +131,25 @@ def main() -> None:
     except Exception:
         _SOURCE = "?"
 
-    # Keep the named `digest` workflow installed/current every session (cheap, runs
-    # regardless of the once/day nudge gate below). Bridges the plugin → workflow gap.
-    ensure_workflow_installed()
-
     today = _today()
 
-    # once/day gate — already nudged today → stay silent
+    # once/day gate — already ran today → stay fully silent (do nothing). Everything
+    # below, including the workflow (re)install, is gated behind this so the whole
+    # hook is a no-op on same-day restarts: convo-digest only acts when today's local
+    # date != last run. Trade-off (accepted): a mid-day plugin update or a deleted
+    # workflow is only re-baked on the next day's first startup, not immediately.
     if os.path.exists(STAMP):
         try:
             if open(STAMP, encoding="utf-8").read().strip() == today:
-                _log("gated (already nudged today)")
+                _log("gated (already ran today)")
                 _emit()
         except OSError:
             pass
+
+    # Keep the named `digest` workflow installed/current. Now under the gate (above),
+    # so it runs at most once/day. Bridges the plugin → workflow gap (bare-name
+    # resolution); idempotent — rewrites only when the baked content changes.
+    ensure_workflow_installed()
 
     # First run: no index yet → a short intro offering to build it, instead of a bulk
     # "N conversations pending" nudge (with no index, prepare.py counts the user's whole
@@ -136,7 +169,10 @@ def main() -> None:
             "friendly one-liner, to run `/convo-digest:digest` to build it. If they have a "
             "lot of history, offer a choice: build everything, or just recent (e.g. the "
             "last week — the digest skill supports a windowed backfill that ignores the "
-            "rest). If they decline or are mid-task, drop it.")
+            "rest). If they decline or are mid-task, drop it. (Once the index exists, a "
+            "separate one-time `/convo-digest:profile-repos` can tag repos work/personal "
+            "for sharper recall — mention only if it comes up naturally, don't pitch both "
+            "at once.)")
 
     # cheap pending count (never let a hook failure block the session)
     try:
@@ -157,19 +193,26 @@ def main() -> None:
     except OSError:
         pass
 
-    if n <= 0:
-        _log("silent (nothing pending)", n)
-        _emit()
+    # Repo-profiling coverage — orthogonal to the pending count: repos with indexed
+    # history but no work/personal profile weaken recall, and (unlike pending convos)
+    # a re-digest never clears it. Computed alongside `n` so BOTH signals ride in one
+    # message — we never want two competing nudges (and never want profiling to be
+    # starved on busy days where there's always something to digest).
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SRC, "repos.py"), "unprofiled", "--index", INDEX],
+            capture_output=True, text=True, timeout=120)
+        m = int(json.loads(proc.stdout).get("count", 0))
+    except Exception as e:
+        _log(f"profile-check error: {e}")
+        m = 0
 
-    _log("nudged", n)
-    big = " (a large backlog — offer to drain it over several mornings, not all at once)" \
-        if n > BIG_BATCH else ""
-    _emit(
-        f"[conversation-digest] {n} finished conversation(s) from earlier aren't in the "
-        f"recall index yet{big}. Offer the user ONCE to refresh recall now: run the "
-        f"`digest` skill to summarize them, then offer the `digest-archive` skill to "
-        f"triage what landed. This is a suggestion — if they decline or are mid-task, "
-        f"drop it and don't repeat.")
+    msg = _build_nudge(n, m)
+    if msg is None:
+        _log("silent (nothing pending, all profiled)", n)
+        _emit()
+    _log(f"nudged (n={n}, m={m})", n)
+    _emit(msg)
 
 
 if __name__ == "__main__":

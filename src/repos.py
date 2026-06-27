@@ -69,8 +69,13 @@ def enumerate_repos(index_path: str) -> list[dict]:
 
 
 def write_repos(profiles: list[dict], out_path: str) -> dict:
-    """profiles: [{cwd, category, purpose, ticket_pattern?, aliases?}] → repos.json keyed by cwd."""
-    repos = {}
+    """profiles: [{cwd, category, purpose, ticket_pattern?, aliases?}] → repos.json keyed by cwd.
+
+    Merges into any existing repos.json (same-cwd entries are overwritten, others
+    preserved) so incremental profiling — one repo at a time, as the hook surfaces
+    them — never clobbers profiles written earlier.
+    """
+    repos = load_repos(out_path)
     for p in profiles:
         cwd = p["cwd"]
         repos[cwd] = {
