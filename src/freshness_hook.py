@@ -96,6 +96,34 @@ def ensure_workflow_installed() -> None:
         _log(f"workflow-install error: {e}")
 
 
+def _build_nudge(n: int, m: int) -> str | None:
+    """Compose the single SessionStart nudge from two independent signals:
+      n = finished conversations pending a digest (the fixed last_ts change-detector)
+      m = repos with indexed history but no work/personal profile
+    Both ride in ONE message — digest leads (primary), profiling rides along
+    (secondary) — so the two never compete for the day's nudge and profiling is
+    never starved on busy days. Returns None when there's nothing worth saying."""
+    if n <= 0 and m <= 0:
+        return None
+    parts = []
+    if n > 0:
+        big = " (a large backlog — offer to drain it over several mornings, not all " \
+            "at once)" if n > BIG_BATCH else ""
+        parts.append(
+            f"DIGEST (the important one): {n} finished conversation(s) from earlier "
+            f"aren't in the recall index yet{big}. Offer to run the `digest` skill to "
+            f"summarize them, then `digest-archive` to triage what landed.")
+    if m > 0:
+        parts.append(
+            f"PROFILE (secondary): {m} repo(s) have indexed history but aren't tagged "
+            f"work/personal — recall shows them as 'unknown'. Offer to run "
+            f"`/convo-digest:profile-repos` to label them and sharpen recall.")
+    return (
+        "[convo-digest] " + "  ".join(parts) + "  Present these in a single message "
+        "(lead with the digest if both apply); each is a suggestion offered ONCE — if "
+        "the user declines or is mid-task, drop it and don't repeat.")
+
+
 def main() -> None:
     global _SOURCE
     try:                                  # SessionStart hooks get a JSON payload on stdin
@@ -160,42 +188,26 @@ def main() -> None:
     except OSError:
         pass
 
-    if n <= 0:
-        # Recall is current, so the day's single nudge slot is free — use it to
-        # surface repo profiling. Repos with indexed history but no work/personal
-        # profile weaken recall's signal, and (unlike pending convos) re-running the
-        # digest never clears it, so it's worth a one-time, low-key offer. Digest
-        # always takes priority over this (handled below — we only reach here when
-        # there's nothing to digest).
-        try:
-            proc = subprocess.run(
-                [sys.executable, os.path.join(SRC, "repos.py"), "unprofiled", "--index", INDEX],
-                capture_output=True, text=True, timeout=120)
-            m = int(json.loads(proc.stdout).get("count", 0))
-        except Exception as e:
-            _log(f"profile-check error: {e}")
-            m = 0
-        if m > 0:
-            _log("nudged (profile-repos)", m)
-            _emit(
-                f"[convo-digest] Recall index is current. {m} repo(s) have indexed "
-                f"history but aren't tagged work/personal yet — profiling them sharpens "
-                f"recall (it can prefer the right kind of past work and label results "
-                f"instead of 'unknown'). Offer the user ONCE, as a friendly one-liner, to "
-                f"run `/convo-digest:profile-repos`. Optional and one-time; if they decline "
-                f"or are mid-task, drop it and don't repeat.")
-        _log("silent (nothing pending)", n)
-        _emit()
+    # Repo-profiling coverage — orthogonal to the pending count: repos with indexed
+    # history but no work/personal profile weaken recall, and (unlike pending convos)
+    # a re-digest never clears it. Computed alongside `n` so BOTH signals ride in one
+    # message — we never want two competing nudges (and never want profiling to be
+    # starved on busy days where there's always something to digest).
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SRC, "repos.py"), "unprofiled", "--index", INDEX],
+            capture_output=True, text=True, timeout=120)
+        m = int(json.loads(proc.stdout).get("count", 0))
+    except Exception as e:
+        _log(f"profile-check error: {e}")
+        m = 0
 
-    _log("nudged", n)
-    big = " (a large backlog — offer to drain it over several mornings, not all at once)" \
-        if n > BIG_BATCH else ""
-    _emit(
-        f"[conversation-digest] {n} finished conversation(s) from earlier aren't in the "
-        f"recall index yet{big}. Offer the user ONCE to refresh recall now: run the "
-        f"`digest` skill to summarize them, then offer the `digest-archive` skill to "
-        f"triage what landed. This is a suggestion — if they decline or are mid-task, "
-        f"drop it and don't repeat.")
+    msg = _build_nudge(n, m)
+    if msg is None:
+        _log("silent (nothing pending, all profiled)", n)
+        _emit()
+    _log(f"nudged (n={n}, m={m})", n)
+    _emit(msg)
 
 
 if __name__ == "__main__":
