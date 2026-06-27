@@ -131,20 +131,25 @@ def main() -> None:
     except Exception:
         _SOURCE = "?"
 
-    # Keep the named `digest` workflow installed/current every session (cheap, runs
-    # regardless of the once/day nudge gate below). Bridges the plugin → workflow gap.
-    ensure_workflow_installed()
-
     today = _today()
 
-    # once/day gate — already nudged today → stay silent
+    # once/day gate — already ran today → stay fully silent (do nothing). Everything
+    # below, including the workflow (re)install, is gated behind this so the whole
+    # hook is a no-op on same-day restarts: convo-digest only acts when today's local
+    # date != last run. Trade-off (accepted): a mid-day plugin update or a deleted
+    # workflow is only re-baked on the next day's first startup, not immediately.
     if os.path.exists(STAMP):
         try:
             if open(STAMP, encoding="utf-8").read().strip() == today:
-                _log("gated (already nudged today)")
+                _log("gated (already ran today)")
                 _emit()
         except OSError:
             pass
+
+    # Keep the named `digest` workflow installed/current. Now under the gate (above),
+    # so it runs at most once/day. Bridges the plugin → workflow gap (bare-name
+    # resolution); idempotent — rewrites only when the baked content changes.
+    ensure_workflow_installed()
 
     # First run: no index yet → a short intro offering to build it, instead of a bulk
     # "N conversations pending" nudge (with no index, prepare.py counts the user's whole
