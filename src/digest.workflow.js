@@ -53,6 +53,11 @@ const BATCH_PREFIX = A.batchPrefix || '_digest_batch_'   // chunk files: _digest
 const CHUNK = A.chunk || 6                                // records per chunk write (small → reliable)
 const MODEL = A.model || 'haiku'
 const LIMIT = A.limit || 20                           // whole-tier convos per run (batched draining)
+// Windowed backfill (issue: huge first run). SINCE limits summarization to convos
+// newer than the window ('7d','48h', or an ISO date); SEED_REST stamps the excluded
+// older convos as handled in the same pass so they don't linger as "pending".
+const SINCE = A.since || null
+const SEED_REST = A.seedRest || false
 // Agent names are NAMESPACED when installed as a plugin (convo-digest:<name>). The
 // freshness hook bakes the real namespace into __CONVO_DIGEST_NS__ at install time
 // (same mechanism as SRC). A user-level workflow has no plugin-namespace context, so
@@ -112,9 +117,11 @@ function wordCount(s) { return (s || '').trim().split(/\s+/).filter(Boolean).len
 
 // --- Prep -------------------------------------------------------------------
 phase('Prep')
+const prepCmd = `python3 ${SRC}/prepare.py --work ${WORK} --index ${INDEX} --limit ${LIMIT}`
+  + (SINCE ? ` --since ${SINCE}` : '') + (SEED_REST ? ' --seed-rest' : '')
 const prep = await agent(
   `Run this EXACT command and return its stdout JSON (it prints one JSON object):\n` +
-  `  python3 ${SRC}/prepare.py --work ${WORK} --index ${INDEX} --limit ${LIMIT}\n` +
+  `  ${prepCmd}\n` +
   `Return the parsed object unchanged.`,
   { schema: PREP_SCHEMA, agentType: RUNNER_AGENT, model: MODEL, label: 'prepare', phase: 'Prep' }
 )

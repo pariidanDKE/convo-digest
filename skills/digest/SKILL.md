@@ -51,6 +51,21 @@ The workflow handles everything: enumerates changed convos, runs one Read-only
 `convo-summarizer` per whole-tier convo (with a gist tightener), and merges the
 6-field records into the index via `index.py`.
 
+### Windowed backfill (big first run — "I only care about recent")
+If the pending count is large (e.g. a new user with hundreds of convos) and the user
+only wants recent history, don't summarize everything. Pass a window:
+
+> `Workflow({ name: "digest", args: { limit: 20, since: "7d", seedRest: true } })`
+
+- `since` — only summarize convos newer than this (`"7d"`, `"48h"`, or an ISO date
+  like `"2026-06-20"`).
+- `seedRest: true` — in the **same pass**, stamp the excluded older convos as handled
+  (stub, no summary) so they don't keep showing up as "pending" or clutter recall.
+
+Result: recall holds just the chosen window, everything older is silently ignored,
+pending count → 0. Still re-launch while `summarized > 0` to drain the windowed set.
+Offer this whenever the backlog is big rather than spawning hundreds of summarizers.
+
 ## 3. Report
 Sum the `indexed` counts across batches and tell the user how many conversations
 were added/updated, and the new index size. Mention any **over-cap (sampler-tier)

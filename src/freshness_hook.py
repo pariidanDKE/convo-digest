@@ -133,9 +133,10 @@ def main() -> None:
             "[convo-digest] 👋 First run — this plugin summarizes your finished Claude "
             "Code conversations into a local, searchable recall index (no API key; nothing "
             "leaves your machine). Your index isn't built yet. Offer the user ONCE, as a "
-            "friendly one-liner, to run `/convo-digest:digest` to build it from past "
-            "conversations — the first pass can be large, so batching or skipping for now "
-            "is fine. If they decline or are mid-task, drop it.")
+            "friendly one-liner, to run `/convo-digest:digest` to build it. If they have a "
+            "lot of history, offer a choice: build everything, or just recent (e.g. the "
+            "last week — the digest skill supports a windowed backfill that ignores the "
+            "rest). If they decline or are mid-task, drop it.")
 
     # cheap pending count (never let a hook failure block the session)
     try:

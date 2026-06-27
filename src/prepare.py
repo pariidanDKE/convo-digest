@@ -19,9 +19,10 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
 import transcript as T  # noqa: E402
@@ -117,6 +118,24 @@ def load_state(path: str) -> dict:
     return {}
 
 
+def _parse_ts(ts: str) -> datetime:
+    """A transcript ISO timestamp (…Z) → aware datetime."""
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+
+def parse_since(s: str) -> datetime:
+    """Parse a --since window into an aware cutoff datetime. Accepts a relative form
+    ('7d', '48h') or an ISO date/datetime ('2026-06-20'). Naive dates assume local tz."""
+    s = s.strip()
+    m = re.fullmatch(r"(\d+)\s*([dDhH])", s)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        return datetime.now(timezone.utc) - (timedelta(days=n) if unit == "d"
+                                             else timedelta(hours=n))
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.astimezone()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Deterministic digest prep.")
     ap.add_argument("--projects", default=os.path.expanduser("~/.claude/projects"))
@@ -147,6 +166,15 @@ def main() -> int:
                          "convo still being written (e.g. a second concurrent session) is a "
                          "moving target that would be re-summarized until it goes idle. It "
                          "gets picked up on the next run once quiet. 0 disables.")
+    ap.add_argument("--since", default=None,
+                    help="windowed backfill: only summarize convos whose last content turn is "
+                         "newer than this. Relative ('7d', '48h') or ISO date ('2026-06-20'). "
+                         "Older convos are excluded from this run (pair with --seed-rest).")
+    ap.add_argument("--seed-rest", action="store_true",
+                    help="with --since: stamp the EXCLUDED older un-indexed convos as handled "
+                         "(stub, no summary) in the same pass, so they don't linger in the "
+                         "pending count. Lets a user backfill just recent history and ignore "
+                         "the rest with one command.")
     ap.add_argument("--seed-state", action="store_true",
                     help="skip backfill: stamp a stub record (last_ts only, no summary) for "
                          "every existing convo so the index starts forward-only. One-time.")
@@ -154,6 +182,7 @@ def main() -> int:
                     help="cheap pending count for the freshness hook: how many FINISHED "
                          "(prior-day) convos changed vs the index. No strip/tokenize/write.")
     args = ap.parse_args()
+    cutoff = parse_since(args.since) if args.since else None
 
     os.makedirs(args.work, exist_ok=True)
     index = load_state(args.index)  # change-detector source: record provenance.last_ts
@@ -219,7 +248,7 @@ def main() -> int:
     convos = []
     n_whole = 0
     counts = {"files": 0, "sidechain_or_empty": 0, "unchanged": 0, "changed": 0,
-              "trivial": 0, "active_skipped": 0}
+              "trivial": 0, "active_skipped": 0, "skipped_old": 0, "seeded": 0}
     now = time.time()
 
     for f in glob.glob(os.path.join(args.projects, "**", "*.jsonl"), recursive=True):
@@ -255,6 +284,22 @@ def main() -> int:
         if last_ts is not None and prior == last_ts:
             counts["unchanged"] += 1
             continue
+
+        # --since windowed backfill: a convo whose last content turn predates the cutoff
+        # is excluded from this run. With --seed-rest, stamp the un-indexed old ones as
+        # handled (stub, no summary) in this same pass so they don't linger as "pending"
+        # — letting a user backfill just recent history and ignore the rest at once.
+        if cutoff is not None and last_ts is not None:
+            try:
+                if _parse_ts(last_ts) < cutoff:
+                    counts["skipped_old"] += 1
+                    if args.seed_rest and key not in index:
+                        index[key] = {"id": cid, "project": tr.facets.project, "source": f,
+                                      "seeded": True, "provenance": {"last_ts": last_ts}}
+                        counts["seeded"] += 1
+                    continue
+            except ValueError:
+                pass
 
         counts["changed"] += 1
         tiering = TK.tier_transcript(tr, counter=counter, cap=args.cap)
@@ -306,6 +351,13 @@ def main() -> int:
             n_whole += 1
             if args.limit and n_whole >= args.limit:
                 break  # batched draining: enough whole-tier convos for this run
+
+    # Persist the stubs seeded for excluded-old convos (deliberate, stub-only write —
+    # same semantics as --seed-state, scoped to < cutoff; never a summary).
+    if args.seed_rest and counts["seeded"]:
+        os.makedirs(os.path.dirname(args.index) or ".", exist_ok=True)
+        with open(args.index, "w", encoding="utf-8") as fh:
+            json.dump(index, fh, ensure_ascii=False, indent=2)
 
     print(json.dumps({"convos": convos, "counts": counts,
                       "cap": args.cap, "counter": counter.name}, indent=2))
