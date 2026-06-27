@@ -264,16 +264,20 @@ def parse_transcript(path: str, include_sidechains: bool = False) -> Transcript:
                 if facets.git_branch is None:
                     facets.git_branch = o["gitBranch"]
                 branches.add(o["gitBranch"])
+            if o.get("type") not in ("user", "assistant"):
+                continue
+            if o.get("isSidechain") and not include_sidechains:
+                continue
+            # Watermark (first_ts/last_ts) advances ONLY on content turns — AFTER the
+            # type + sidechain filters. Otherwise trailing non-content events (queue-
+            # operation, task-notification, attachments) move last_ts and trip the
+            # change-detector into re-summarizing a dormant convo (issue #2). It's an
+            # allowlist, so any future non-content event type is excluded automatically.
             ts = o.get("timestamp")
             if ts:
                 if facets.first_ts is None:
                     facets.first_ts = ts
                 facets.last_ts = ts
-
-            if o.get("type") not in ("user", "assistant"):
-                continue
-            if o.get("isSidechain") and not include_sidechains:
-                continue
             msg = o.get("message")
             if not isinstance(msg, dict):
                 continue
