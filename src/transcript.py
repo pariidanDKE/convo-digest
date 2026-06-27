@@ -192,6 +192,36 @@ def _is_real_user_turn(content: Any) -> bool:
     return False
 
 
+# Harness-injected payloads that arrive wearing type:"user" but were NOT authored
+# by the user (task completions, session reminders, slash-command output). They
+# look exactly like real input to _is_real_user_turn, so they must be filtered
+# explicitly — otherwise a background task notifying back into a dormant convo
+# advances last_ts and re-triggers a summary (issue #2 follow-up), and the payload
+# pollutes the exchange stream fed to the summarizer.
+_HARNESS_TAGS = (
+    "<task-notification>", "<system-reminder>", "<local-command-stdout>",
+    "<command-message>", "<command-name>", "<command-args>",
+)
+
+
+def _is_synthetic_user(content: Any) -> bool:
+    """True for a harness-injected user message (see _HARNESS_TAGS).
+
+    A genuine turn that merely *carries* an appended reminder alongside real text
+    is NOT synthetic — only messages whose entire visible text is harness payload.
+    """
+    def _starts(s: str) -> bool:
+        return s.lstrip().startswith(_HARNESS_TAGS)
+
+    if isinstance(content, str):
+        return _starts(content)
+    if isinstance(content, list):
+        texts = [b.get("text", "") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text"]
+        return bool(texts) and all(_starts(t) for t in texts)
+    return False
+
+
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
         return None
@@ -268,21 +298,27 @@ def parse_transcript(path: str, include_sidechains: bool = False) -> Transcript:
                 continue
             if o.get("isSidechain") and not include_sidechains:
                 continue
-            # Watermark (first_ts/last_ts) advances ONLY on content turns — AFTER the
-            # type + sidechain filters. Otherwise trailing non-content events (queue-
-            # operation, task-notification, attachments) move last_ts and trip the
-            # change-detector into re-summarizing a dormant convo (issue #2). It's an
-            # allowlist, so any future non-content event type is excluded automatically.
-            ts = o.get("timestamp")
-            if ts:
-                if facets.first_ts is None:
-                    facets.first_ts = ts
-                facets.last_ts = ts
             msg = o.get("message")
             if not isinstance(msg, dict):
                 continue
             role = msg.get("role")
             content = msg.get("content")
+            # Drop harness-injected synthetic user messages before they can affect
+            # anything: they wear type:"user" but were not authored by the user, so
+            # they must neither advance the watermark nor become exchanges (issue #2
+            # follow-up — a non-content type filter alone misses these).
+            if role == "user" and _is_synthetic_user(content):
+                continue
+            # Watermark (first_ts/last_ts) advances ONLY on genuine content turns —
+            # AFTER the type, sidechain, and synthetic filters. Otherwise trailing
+            # non-content events (queue-operation, task-notification, attachments)
+            # move last_ts and trip the change-detector into re-summarizing a
+            # dormant convo (issue #2).
+            ts = o.get("timestamp")
+            if ts:
+                if facets.first_ts is None:
+                    facets.first_ts = ts
+                facets.last_ts = ts
 
             # mine tool I/O before the strip discards it
             for b in _blocks(content):
