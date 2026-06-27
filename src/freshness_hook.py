@@ -136,7 +136,10 @@ def main() -> None:
             "friendly one-liner, to run `/convo-digest:digest` to build it. If they have a "
             "lot of history, offer a choice: build everything, or just recent (e.g. the "
             "last week — the digest skill supports a windowed backfill that ignores the "
-            "rest). If they decline or are mid-task, drop it.")
+            "rest). If they decline or are mid-task, drop it. (Once the index exists, a "
+            "separate one-time `/convo-digest:profile-repos` can tag repos work/personal "
+            "for sharper recall — mention only if it comes up naturally, don't pitch both "
+            "at once.)")
 
     # cheap pending count (never let a hook failure block the session)
     try:
@@ -158,6 +161,29 @@ def main() -> None:
         pass
 
     if n <= 0:
+        # Recall is current, so the day's single nudge slot is free — use it to
+        # surface repo profiling. Repos with indexed history but no work/personal
+        # profile weaken recall's signal, and (unlike pending convos) re-running the
+        # digest never clears it, so it's worth a one-time, low-key offer. Digest
+        # always takes priority over this (handled below — we only reach here when
+        # there's nothing to digest).
+        try:
+            proc = subprocess.run(
+                [sys.executable, os.path.join(SRC, "repos.py"), "unprofiled", "--index", INDEX],
+                capture_output=True, text=True, timeout=120)
+            m = int(json.loads(proc.stdout).get("count", 0))
+        except Exception as e:
+            _log(f"profile-check error: {e}")
+            m = 0
+        if m > 0:
+            _log("nudged (profile-repos)", m)
+            _emit(
+                f"[convo-digest] Recall index is current. {m} repo(s) have indexed "
+                f"history but aren't tagged work/personal yet — profiling them sharpens "
+                f"recall (it can prefer the right kind of past work and label results "
+                f"instead of 'unknown'). Offer the user ONCE, as a friendly one-liner, to "
+                f"run `/convo-digest:profile-repos`. Optional and one-time; if they decline "
+                f"or are mid-task, drop it and don't repeat.")
         _log("silent (nothing pending)", n)
         _emit()
 
