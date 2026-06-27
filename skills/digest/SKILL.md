@@ -38,15 +38,14 @@ Run the digest workflow with `{limit: 20}` and **repeat until it reports
 `summarized: 0`** — each run advances the change-detector, so successive runs
 pick up where the last stopped (checkpointed; a crash mid-drain loses nothing).
 
-> Run the **named** workflow `digest` via the Workflow tool with args `{"limit": 20}`
-> — invoke it by name, NOT by scriptPath (a named workflow runs unattended; a dynamic
-> scriptPath triggers a "review before running" gate that blocks headless/`claude -p`
-> runs). The plugin's SessionStart hook installs this workflow to
-> `~/.claude/workflows/digest.js` (user-level, available in every project) with the
-> engine path baked in, so the name resolves with no args beyond `limit`. If a fresh
-> install reports the `digest` workflow as unknown, it's the first-session ordering
-> case — start a new session (the hook installs it) and retry. Wait for it to finish,
-> and re-launch while `summarized > 0`.
+> Run the workflow via the Workflow tool as `Workflow({ name: "digest", args: {"limit": 20} })`.
+> Use the **BARE** name `digest` — do NOT namespace it as `convo-digest:digest`, and do
+> NOT use scriptPath. Only the bare name resolves to the hook-installed copy at
+> `~/.claude/workflows/digest.js`, which has the engine path and namespaced agent names
+> baked in; the namespaced/scriptPath forms hit an un-baked template and fail (issue #1).
+> No args beyond `limit` are needed. If a fresh install reports the `digest` workflow as
+> unknown, it's the first-session ordering case — start a new session (the hook installs
+> it on startup) and retry. Wait for it to finish, and re-launch while `summarized > 0`.
 
 The workflow handles everything: enumerates changed convos, runs one Read-only
 `convo-summarizer` per whole-tier convo (with a gist tightener), and merges the

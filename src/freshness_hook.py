@@ -65,18 +65,24 @@ WORKFLOWS_DST = os.path.expanduser("~/.claude/workflows")
 
 
 def ensure_workflow_installed() -> None:
-    """Install the named `digest` workflow into ~/.claude/workflows/ so it resolves in
-    every project. Plugins can't ship a workflow as an auto-discovered component, so the
-    plugin carries workflows/digest.js with a __CONVO_DIGEST_SRC__ placeholder and we
-    copy it here with the real <plugin>/src baked in. Idempotent: only rewrites when the
-    resolved content changes (e.g. after a plugin update). Never blocks the session."""
+    """Install the named `digest` workflow into ~/.claude/workflows/ so it resolves (as
+    the bare name `digest`) in every project. Plugins can't ship a workflow as an
+    auto-discovered component, so the plugin carries src/digest.workflow.js as a template
+    with placeholders we bake at install time:
+      __CONVO_DIGEST_SRC__  → the real <plugin>/src (so the engine is found)
+      __CONVO_DIGEST_NS__   → 'convo-digest:' (so the namespaced agents resolve from a
+                              user-level workflow, which has no plugin-namespace context)
+    The template lives in src/ — NOT a workflows/ dir — precisely so it is NOT also
+    auto-discovered as a half-baked namespaced `convo-digest:digest` (see issue #1).
+    Idempotent: rewrites only when the resolved content changes. Never blocks."""
     try:
-        plugin_root = os.path.dirname(SRC)                       # SRC = <plugin>/src
-        src_wf = os.path.join(plugin_root, "workflows", "digest.js")
+        src_wf = os.path.join(SRC, "digest.workflow.js")         # SRC = <plugin>/src
         if not os.path.exists(src_wf):
             return                                               # not the plugin layout (e.g. bare checkout)
         with open(src_wf, encoding="utf-8") as fh:
-            content = fh.read().replace("__CONVO_DIGEST_SRC__", SRC)
+            content = (fh.read()
+                       .replace("__CONVO_DIGEST_SRC__", SRC)
+                       .replace("__CONVO_DIGEST_NS__", "convo-digest:"))
         dst_wf = os.path.join(WORKFLOWS_DST, "digest.js")
         if os.path.exists(dst_wf):
             with open(dst_wf, encoding="utf-8") as fh:
