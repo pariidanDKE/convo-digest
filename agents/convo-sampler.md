@@ -58,7 +58,9 @@ Rules:
 - **unresolved** — the concrete open thread / next step, or null when solved.
   Keep it aligned with status.
 - **key_entities** — salient named things the prose would lose: ticket codes, API
-  symbols, error/test names, concepts. Skip anything already in `facets`.
+  symbols, error/test names, concepts. Leave out anything already in `facets`.
+  Always emit this field: return an empty array `[]` when nothing qualifies beyond
+  the facets (common for file/command-heavy sessions) — never omit it.
 
 The `facets` are handed in, not yours to regenerate. Write `gist` and
 `key_entities` around them, not over them. Account for the *whole* conversation

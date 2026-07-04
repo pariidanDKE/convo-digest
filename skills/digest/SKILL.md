@@ -72,6 +72,30 @@ were added/updated, and the new index size. Mention any **over-cap (sampler-tier
 convos that were skipped** — those need the (deferred) horizontal sampler and are
 not yet in the index.
 
+## Title-writeback opt-in (first run)
+The digest already names every conversation. It can also write that name back to
+each conversation's Claude Code transcript so it shows up as the title in the
+`claude --resume` picker. This is **opt-in** and persisted in
+`~/.claude/digest/config.json` as a tri-state `write_titles` (`true` / `false` /
+`"not_now"` / absent).
+
+- If the SessionStart hook says the opt-in is unset (or you see no `write_titles`
+  key in `config.json`), ask the user **once**, Yes/No: *"Want the digest to write
+  its generated titles back so they show in your `claude --resume` picker? It only
+  fills in sessions without a title and never overwrites ones you set yourself."*
+- Persist their answer with a single command (don't hand-write the JSON):
+  ```bash
+  python3 ${CLAUDE_PLUGIN_ROOT}/src/index.py --set-write-titles <yes|no|not_now>
+  ```
+  Yes enables it from the next digest on; No stops the ask for good; not_now
+  re-offers later.
+
+When `write_titles` is `true`, the Index step's `index.py` merge writes titles
+automatically — the workflow needs no extra args. **Fill-or-ours** policy: it only
+titles sessions with no existing `custom-title`, or refreshes one the digest itself
+wrote before (tracked in `provenance.title_written`); it never clobbers a human or
+Claude-Code-auto title.
+
 ## Notes
 - Idempotent: re-running when nothing changed is a no-op (`changed == 0`).
 - No API key — runs on the Claude Code subscription via the workflow's agents.

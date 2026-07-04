@@ -79,7 +79,12 @@ const SUMMARY_SCHEMA = {
     unresolved: { type: ['string', 'null'] },
     key_entities: { type: 'array', items: { type: 'string' }, maxItems: 8 },
   },
-  required: ['title', 'topics', 'gist', 'status', 'unresolved', 'key_entities'],
+  // key_entities is intentionally NOT required: the agent guidance tells the model to
+  // skip entities already in `facets`, so on file/command-heavy convos there's often
+  // nothing left and Haiku drops the field entirely rather than emitting []. Requiring
+  // it turned that into a hard StructuredOutput failure that burned the retry cap (5×)
+  // and lost the whole record. index.py already defaults a missing/null value to [].
+  required: ['title', 'topics', 'gist', 'status', 'unresolved'],
 }
 
 const PREP_SCHEMA = {

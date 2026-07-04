@@ -31,6 +31,11 @@ PROMPT_VERSION = "v1"
 SCHEMA_VERSION = "4.7"
 SUMMARY_FIELDS = ("title", "topics", "gist", "status", "unresolved", "key_entities")
 
+# Shared plugin config (tri-state `write_titles`: True | False | "not_now" | absent).
+# No dedicated module: the hook reads it inline, we read it via _load_json below, and
+# --set-write-titles writes it via _dump_json — one small key doesn't warrant config.py.
+CONFIG_PATH = os.path.expanduser("~/.claude/digest/config.json")
+
 
 def _ts(s: str | None) -> datetime | None:
     if not s:
@@ -228,8 +233,64 @@ def _dump_json(path: str, obj: object) -> None:
         json.dump(obj, fh, ensure_ascii=False, indent=2)
 
 
+def _resolve_write_titles(override: bool | None) -> bool:
+    """Whether to write digest titles back to transcripts. An explicit CLI override
+    wins (for testing); otherwise the persisted opt-in gates it — only the literal
+    True enables writing (False / "not_now" / absent all mean no)."""
+    if override is not None:
+        return override
+    return _load_json(CONFIG_PATH).get("write_titles") is True
+
+
+def _read_last_custom_title(source: str) -> str | None:
+    """The most-recent customTitle on a Claude Code transcript, or None if it has
+    none. Transcripts are JSONL; scan line-by-line and tolerate malformed lines."""
+    last = None
+    try:
+        with open(source, encoding="utf-8") as fh:
+            for line in fh:
+                if '"custom-title"' not in line:          # cheap prefilter
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if o.get("type") == "custom-title" and o.get("customTitle"):
+                    last = o["customTitle"]
+    except OSError:
+        return None
+    return last
+
+
+def _write_session_title(source: str, session_id: str, title: str,
+                         prev_written: str | None) -> str | None:
+    """Append a `custom-title` record so `title` shows in the `--resume` picker.
+
+    FILL-OR-OURS policy: write only when the transcript has no custom-title yet, OR
+    its current one is exactly what WE wrote last run (`prev_written`). Never clobber
+    a title we didn't author — a human `/title` or Claude Code's own auto-title. The
+    `custom-title` record is an undocumented CC internal; if the format ever changes
+    the prefilter simply stops matching and we no-op rather than corrupt anything.
+    Returns the title actually written, else None (skipped / already current)."""
+    if not (source and title and session_id and os.path.exists(source)):
+        return None
+    on_disk = _read_last_custom_title(source)
+    if on_disk is not None and on_disk != prev_written:
+        return None                       # someone else's title — leave it alone
+    if on_disk == title:
+        return title                      # already current — idempotent, no append
+    rec = {"type": "custom-title", "sessionId": session_id, "customTitle": title}
+    try:
+        with open(source, "a", encoding="utf-8") as fh:   # O_APPEND: atomic tail write
+            # compact separators to match Claude Code's own custom-title lines exactly
+            fh.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        return None
+    return title
+
+
 def _merge_items(items: list, index: dict, index_path: str,
-                 *, counter, repos, model: str) -> tuple[int, list]:
+                 *, counter, repos, model: str, write_titles: bool = False) -> tuple[int, list]:
     """Build a record per {key, work_path, summary} item and merge it into the index,
     persisting **after each record** so a crash mid-merge loses no completed work and
     leaves prior records' watermark intact (SPEC §4.5 — change detection now reads
@@ -237,7 +298,12 @@ def _merge_items(items: list, index: dict, index_path: str,
 
     Preserves the record's `curation` (archive flag) across re-summarize: build_record
     produces a fresh record without it, so we carry the prior one forward — otherwise a
-    re-digest would silently un-archive a convo. Returns (written, failed)."""
+    re-digest would silently un-archive a convo.
+
+    When `write_titles`, also write the digest title back to the conversation's own CC
+    transcript as a `custom-title` (fill-or-ours; see _write_session_title). We track
+    what we wrote in provenance.title_written so a later re-digest recognises its own
+    title as safe to refresh (vs a foreign one to leave alone). Returns (written, failed)."""
     written, failed = 0, []
     for it in items:
         try:
@@ -249,6 +315,12 @@ def _merge_items(items: list, index: dict, index_path: str,
             old = index.get(it["key"])
             if old and old.get("curation"):       # carry archive state forward
                 rec["curation"] = old["curation"]
+            if write_titles:
+                prev = (old or {}).get("provenance", {}).get("title_written")
+                wrote = _write_session_title(
+                    rec.get("source"), rec.get("id"), rec["summary"].get("title"), prev)
+                if wrote:
+                    rec["provenance"]["title_written"] = wrote
             index[it["key"]] = rec
             _dump_json(index_path, index)         # persist per-record (crash-safe)
             written += 1
@@ -258,18 +330,20 @@ def _merge_items(items: list, index: dict, index_path: str,
 
 
 def run_batch(batch_path: str, index_path: str, *,
-              model: str = "haiku-4-5", cleanup: bool = False) -> dict:
+              model: str = "haiku-4-5", cleanup: bool = False,
+              write_titles: bool | None = None) -> dict:
     """Merge a single batch file (a JSON array of {key, work_path, summary}) into the
     index store. The batch file is written by an orchestrating agent; `cleanup=True`
-    unlinks it once consumed.
+    unlinks it once consumed. `write_titles=None` reads the persisted opt-in.
     """
     counter = TK.default_counter()
     repos = R.load_repos()  # loaded once; passed into each build_record
+    wt = _resolve_write_titles(write_titles)
     with open(batch_path, encoding="utf-8") as fh:
         items = json.load(fh)
     index = _load_json(index_path)
     written, failed = _merge_items(items, index, index_path,
-                                   counter=counter, repos=repos, model=model)
+                                   counter=counter, repos=repos, model=model, write_titles=wt)
     if cleanup:
         try:
             os.remove(batch_path)
@@ -279,7 +353,8 @@ def run_batch(batch_path: str, index_path: str, *,
 
 
 def run_batch_glob(pattern: str, index_path: str, *,
-                   model: str = "haiku-4-5", cleanup: bool = False) -> dict:
+                   model: str = "haiku-4-5", cleanup: bool = False,
+                   write_titles: bool | None = None) -> dict:
     """Merge MANY small batch files matching `pattern` (each a JSON array — or a lone
     object — of {key, work_path, summary}) into the index in one deterministic pass.
 
@@ -288,9 +363,11 @@ def run_batch_glob(pattern: str, index_path: str, *,
     file, then this reads them all with **zero re-transcription** and merges. A chunk
     an agent mangled fails to parse → recorded in `failed`, the rest still land, and
     the un-merged convos self-heal next run (their change-detector never advanced).
+    `write_titles=None` reads the persisted opt-in.
     """
     counter = TK.default_counter()
     repos = R.load_repos()
+    wt = _resolve_write_titles(write_titles)
     files = sorted(glob.glob(pattern))
     items, failed = [], []
     for f in files:
@@ -302,7 +379,7 @@ def run_batch_glob(pattern: str, index_path: str, *,
             failed.append({"file": f, "error": str(e)})
     index = _load_json(index_path)
     written, item_failed = _merge_items(items, index, index_path,
-                                        counter=counter, repos=repos, model=model)
+                                        counter=counter, repos=repos, model=model, write_titles=wt)
     failed.extend(item_failed)
     if cleanup:
         for f in files:
@@ -327,20 +404,34 @@ def main() -> int:
                     help="unlink the consumed batch file(s) after merging (keeps cwd clean)")
     ap.add_argument("--model", default="haiku-4-5")
     ap.add_argument("--summarized-at", help="ISO ts (override for reproducible output)")
+    ap.add_argument("--write-titles", dest="write_titles", action="store_true", default=None,
+                    help="force writing digest titles back to transcripts (overrides config)")
+    ap.add_argument("--no-write-titles", dest="write_titles", action="store_false",
+                    help="force NOT writing titles back (overrides config)")
+    ap.add_argument("--set-write-titles", choices=["yes", "no", "not_now"],
+                    help="persist the title-writeback opt-in to config.json and exit")
     args = ap.parse_args()
+
+    if args.set_write_titles:
+        val = {"yes": True, "no": False, "not_now": "not_now"}[args.set_write_titles]
+        cfg = _load_json(CONFIG_PATH)
+        cfg["write_titles"] = val
+        _dump_json(CONFIG_PATH, cfg)
+        print(json.dumps({"write_titles": val}))
+        return 0
 
     if args.batch_glob:
         if not args.index:
             ap.error("--batch-glob requires --index")
-        print(json.dumps(run_batch_glob(args.batch_glob, args.index,
-                                        model=args.model, cleanup=args.cleanup)))
+        print(json.dumps(run_batch_glob(args.batch_glob, args.index, model=args.model,
+                                        cleanup=args.cleanup, write_titles=args.write_titles)))
         return 0
 
     if args.batch:
         if not args.index:
             ap.error("--batch requires --index")
-        print(json.dumps(run_batch(args.batch, args.index,
-                                   model=args.model, cleanup=args.cleanup)))
+        print(json.dumps(run_batch(args.batch, args.index, model=args.model,
+                                   cleanup=args.cleanup, write_titles=args.write_titles)))
         return 0
 
     if not (args.work and args.summary):
