@@ -42,8 +42,10 @@ Guidance per field:
   solved. Keep it aligned with status.
 
 - **key_entities** — salient named things the prose would otherwise lose: ticket
-  codes, API symbols, error/test names, concepts. Skip anything already in
-  `facets` (files, commands, branches) — recall queries those directly.
+  codes, API symbols, error/test names, concepts. Leave out anything already in
+  `facets` (files, commands, branches) — recall queries those directly. Always
+  emit this field: return an empty array `[]` when nothing qualifies beyond the
+  facets (common for file/command-heavy sessions) — never omit it.
 
 The `facets` are handed in, not yours to regenerate. Write `gist` and
 `key_entities` around them, not over them.
