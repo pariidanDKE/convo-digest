@@ -282,7 +282,8 @@ def _write_session_title(source: str, session_id: str, title: str,
     rec = {"type": "custom-title", "sessionId": session_id, "customTitle": title}
     try:
         with open(source, "a", encoding="utf-8") as fh:   # O_APPEND: atomic tail write
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            # compact separators to match Claude Code's own custom-title lines exactly
+            fh.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
     except OSError:
         return None
     return title
