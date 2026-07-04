@@ -22,6 +22,7 @@ DIGEST = os.path.expanduser("~/.claude/digest")
 STAMP = os.path.join(DIGEST, "last_nudged_date")   # once/day gate (separate from the count)
 INDEX = os.path.join(DIGEST, "index.json")
 LOG = os.path.join(DIGEST, "freshness_hook.log")    # ground-truth trace of every fire
+CONFIG = os.path.join(DIGEST, "config.json")        # tri-state write_titles opt-in
 SRC = os.path.dirname(os.path.abspath(__file__))
 BIG_BATCH = 25                                       # above this, suggest draining over days
 
@@ -42,6 +43,17 @@ def _has_index() -> bool:
         return isinstance(data, dict) and bool(data)
     except Exception:
         return False
+
+
+def _load_config() -> dict:
+    """The plugin config (config.json); {} when absent/unreadable. Read inline — one
+    tri-state key (write_titles) doesn't warrant a shared module."""
+    try:
+        with open(CONFIG, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def _log(decision: str, n: object = "") -> None:
@@ -96,14 +108,15 @@ def ensure_workflow_installed() -> None:
         _log(f"workflow-install error: {e}")
 
 
-def _build_nudge(n: int, m: int) -> str | None:
-    """Compose the single SessionStart nudge from two independent signals:
+def _build_nudge(n: int, m: int, titles_unset: bool = False) -> str | None:
+    """Compose the single SessionStart nudge from three independent signals:
       n = finished conversations pending a digest (the fixed last_ts change-detector)
       m = repos with indexed history but no work/personal profile
-    Both ride in ONE message — digest leads (primary), profiling rides along
-    (secondary) — so the two never compete for the day's nudge and profiling is
-    never starved on busy days. Returns None when there's nothing worth saying."""
-    if n <= 0 and m <= 0:
+      titles_unset = the write_titles opt-in is still undecided (absent / "not_now")
+    All ride in ONE message — digest leads (primary), profiling + the titles ask ride
+    along (secondary) — so they never compete for the day's nudge and neither is
+    starved on busy days. Returns None when there's nothing worth saying."""
+    if n <= 0 and m <= 0 and not titles_unset:
         return None
     parts = []
     if n > 0:
@@ -118,6 +131,14 @@ def _build_nudge(n: int, m: int) -> str | None:
             f"PROFILE (secondary): {m} repo(s) have indexed history but aren't tagged "
             f"work/personal — recall shows them as 'unknown'. Offer to run "
             f"`/convo-digest:profile-repos` to label them and sharpen recall.")
+    if titles_unset:
+        parts.append(
+            "TITLES (secondary): the title-writeback opt-in isn't set yet. Ask the user "
+            "ONCE (Yes/No) whether the digest may write its generated titles back to each "
+            "conversation's Claude Code transcript, so they show up in the `claude "
+            "--resume` picker (fill-only; never overwrites a title they set themselves). "
+            "Persist the answer with `python3 <plugin>/src/index.py --set-write-titles "
+            "<yes|no>` — Yes enables it on the next digest; No stops this ask for good.")
     return (
         "[convo-digest] " + "  ".join(parts) + "  Present these in a single message "
         "(lead with the digest if both apply); each is a suggestion offered ONCE — if "
@@ -207,11 +228,21 @@ def main() -> None:
         _log(f"profile-check error: {e}")
         m = 0
 
-    msg = _build_nudge(n, m)
+    # Title-writeback opt-in — tri-state in config.json. Undecided (key absent) or
+    # "not_now" → keep asking (rides the daily nudge like profiling); True/False are
+    # final and stay silent. Only reachable once an index exists (the no-index intro
+    # returns earlier), so we never ask before the first digest has run.
+    try:
+        titles_unset = _load_config().get("write_titles") in (None, "not_now")
+    except Exception as e:
+        _log(f"titles-check error: {e}")
+        titles_unset = False
+
+    msg = _build_nudge(n, m, titles_unset)
     if msg is None:
-        _log("silent (nothing pending, all profiled)", n)
+        _log("silent (nothing pending, all profiled, titles decided)", n)
         _emit()
-    _log(f"nudged (n={n}, m={m})", n)
+    _log(f"nudged (n={n}, m={m}, titles_unset={titles_unset})", n)
     _emit(msg)
 
 
