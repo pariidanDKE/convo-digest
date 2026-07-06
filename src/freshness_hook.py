@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
 """freshness_hook.py — SessionStart hook: nudge to refresh the recall index (#12, SPEC §7.1).
 
-The freshness baseline. On the first session of the day it counts how many finished
-(prior-day) conversations aren't in the recall index yet and, if any, injects a one-line
-nudge so the model can offer to run the digest (then digest-archive). Once-per-day: a
-date stamp stops it nagging twice the same day. Never blocks or errors out the session —
-any failure exits silently with no context.
+The freshness baseline. It counts how many finished (prior-day) conversations aren't in
+the recall index yet and, if any, injects a one-line nudge so the model can offer to run
+the digest (then digest-archive). Never blocks or errors out the session — any failure
+exits silently with no context.
+
+Self-healing daily offer (#5). The nudge is only ever surfaced to the user *by the model*
+relaying it (a SessionStart hook has no direct-to-user channel), so a silently-dropped
+offer must get another shot rather than vanishing for the day. The gate therefore treats
+the offer as "done" on exactly two conditions:
+  • the backlog is drained (pending count n == 0), or
+  • the user explicitly opts out — "not today" (a one-day dismiss stamp) or "off for good"
+    (config `nudge_disabled`), both persisted by `index.py --dismiss-nudge`.
+It is NOT marked done on a mere attempt. A per-session guard (keyed on session_id) keeps
+it to once per conversation — quiet on same-session re-fires (compact/clear), but a NEW
+conversation re-nudges until drained or dismissed. The full pending scan is cached so this
+per-session retry stays cheap (rescans ~once/day, or right after a digest changes the index).
 
 Output (stdout, only when nudging): the SessionStart context JSON Claude Code expects:
   {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}
@@ -19,14 +30,18 @@ import sys
 from datetime import datetime
 
 DIGEST = os.path.expanduser("~/.claude/digest")
-STAMP = os.path.join(DIGEST, "last_nudged_date")   # once/day gate (separate from the count)
 INDEX = os.path.join(DIGEST, "index.json")
 LOG = os.path.join(DIGEST, "freshness_hook.log")    # ground-truth trace of every fire
-CONFIG = os.path.join(DIGEST, "config.json")        # tri-state write_titles opt-in
+CONFIG = os.path.join(DIGEST, "config.json")        # write_titles opt-in + nudge_disabled
+# --- self-healing nudge state (#5) ------------------------------------------
+SESSION_STAMP = os.path.join(DIGEST, "last_nudged_session")   # per-session guard (session_id)
+DISMISS_STAMP = os.path.join(DIGEST, "nudge_dismissed_date")  # "not today" (a local date)
+COUNT_CACHE = os.path.join(DIGEST, "nudge_count.json")        # cached n/m so retries stay cheap
 SRC = os.path.dirname(os.path.abspath(__file__))
 BIG_BATCH = 25                                       # above this, suggest draining over days
 
-_SOURCE = "?"  # SessionStart source (startup/resume/clear/compact), read from stdin
+_SOURCE = "?"   # SessionStart source (startup/resume/clear/compact), read from stdin
+_SESSION = ""   # SessionStart session_id (per-session guard key), read from stdin/env
 
 
 def _today() -> str:
@@ -54,6 +69,81 @@ def _load_config() -> dict:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _read_text(path: str) -> str | None:
+    """Stripped contents of a small state file, or None if absent/unreadable."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def _write_text(path: str, val: str) -> None:
+    try:
+        os.makedirs(DIGEST, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(val)
+    except OSError:
+        pass
+
+
+def _index_mtime() -> float:
+    try:
+        return os.path.getmtime(INDEX)
+    except OSError:
+        return 0.0
+
+
+def _count_pending() -> int | None:
+    """Finished (prior-day) convos not yet in the index, via prepare.py --count-only.
+    None on any failure (so we neither nudge on a bad count nor cache a wrong 0)."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SRC, "prepare.py"), "--count-only", "--index", INDEX],
+            capture_output=True, text=True, timeout=120)
+        return int(json.loads(proc.stdout).get("changed", 0))
+    except Exception as e:
+        _log(f"count error: {e}")
+        return None
+
+
+def _count_unprofiled() -> int | None:
+    """Repos with indexed history but no work/personal profile, via repos.py. None on failure."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SRC, "repos.py"), "unprofiled", "--index", INDEX],
+            capture_output=True, text=True, timeout=120)
+        return int(json.loads(proc.stdout).get("count", 0))
+    except Exception as e:
+        _log(f"profile-check error: {e}")
+        return None
+
+
+def _counts(today: str) -> tuple[int, int]:
+    """(n, m) = (pending convos, unprofiled repos). Both derive from the index, so we
+    cache them keyed on (today, index mtime) and reuse until the day rolls over or a
+    digest mutates the index. This is what makes the per-session retry cheap: the full
+    prepare.py scan runs ~once/day, not on every new conversation. A failed scan is NOT
+    cached (returns the live value, leaves the cache stale) so it retries next session."""
+    mt = _index_mtime()
+    try:
+        with open(COUNT_CACHE, encoding="utf-8") as fh:
+            c = json.load(fh)
+        if c.get("date") == today and c.get("index_mtime") == mt:
+            return int(c.get("n", 0)), int(c.get("m", 0))
+    except Exception:
+        pass
+    n, m = _count_pending(), _count_unprofiled()
+    if n is not None and m is not None:                 # only cache a clean scan
+        try:
+            os.makedirs(DIGEST, exist_ok=True)
+            with open(COUNT_CACHE, "w", encoding="utf-8") as fh:
+                json.dump({"date": today, "n": n, "m": m, "index_mtime": mt}, fh)
+        except OSError:
+            pass
+    return (n or 0), (m or 0)
 
 
 def _log(decision: str, n: object = "") -> None:
@@ -140,107 +230,93 @@ def _build_nudge(n: int, m: int, titles_unset: bool = False) -> str | None:
             "Persist the answer with `python3 <plugin>/src/index.py --set-write-titles "
             "<yes|no>` — Yes enables it on the next digest; No stops this ask for good.")
     return (
-        "[convo-digest] " + "  ".join(parts) + "  Present these in a single message "
-        "(lead with the digest if both apply); each is a suggestion offered ONCE — if "
-        "the user declines or is mid-task, drop it and don't repeat.")
+        "[convo-digest] Before your other opening remarks, you MUST surface this to the "
+        "user (it is the plugin's core daily offer, easy to drop): " + "  ".join(parts) +
+        "  Present it in a single message (lead with the digest if several apply). If the "
+        "user declines, PERSIST it so it doesn't nag: run `python3 <plugin>/src/index.py "
+        "--dismiss-nudge today` (asks again tomorrow if a backlog remains) or `--dismiss-nudge "
+        "off` (stops the daily nudge for good). If they engage or ignore it, do NOT persist "
+        "anything — a silently-missed offer is meant to re-surface next conversation.")
 
 
 def main() -> None:
-    global _SOURCE
+    global _SOURCE, _SESSION
     try:                                  # SessionStart hooks get a JSON payload on stdin
-        _SOURCE = (json.loads(sys.stdin.read() or "{}").get("source") or "?")
+        payload = json.loads(sys.stdin.read() or "{}")
     except Exception:
-        _SOURCE = "?"
+        payload = {}
+    _SOURCE = payload.get("source") or "?"
+    _SESSION = (payload.get("session_id")
+                or os.environ.get("CLAUDE_CODE_SESSION_ID") or "")
 
     today = _today()
 
-    # once/day gate — already ran today → stay fully silent (do nothing). Everything
-    # below, including the workflow (re)install, is gated behind this so the whole
-    # hook is a no-op on same-day restarts: convo-digest only acts when today's local
-    # date != last run. Trade-off (accepted): a mid-day plugin update or a deleted
-    # workflow is only re-baked on the next day's first startup, not immediately.
-    if os.path.exists(STAMP):
-        try:
-            if open(STAMP, encoding="utf-8").read().strip() == today:
-                _log("gated (already ran today)")
-                _emit()
-        except OSError:
-            pass
+    # Per-session guard. SessionStart can fire more than once per conversation (startup,
+    # then compact/clear keep the same session_id); we handle a given session exactly
+    # once. A NEW conversation carries a new id and gets a fresh shot — that is the
+    # self-heal (#5): a silently-dropped offer re-surfaces next conversation rather than
+    # being lost for the whole day. This replaces the old once/day date gate that tripped
+    # on a mere attempt, before the user had seen anything. No id → key on the date, so a
+    # missing id degrades to once/day instead of nudging on every fire.
+    session_key = _SESSION or f"date:{today}"
+    if _read_text(SESSION_STAMP) == session_key:
+        _log("gated (already handled this session)")
+        _emit()
+    # Commit to handling this session now: every path below runs at most once per
+    # conversation, whether it ends up nudging or staying silent.
+    _write_text(SESSION_STAMP, session_key)
 
-    # Keep the named `digest` workflow installed/current. Now under the gate (above),
-    # so it runs at most once/day. Bridges the plugin → workflow gap (bare-name
-    # resolution); idempotent — rewrites only when the baked content changes.
+    # Keep the named `digest` workflow installed/current. Runs once per conversation now
+    # (decoupled from the old once/day gate), so a plugin update or a deleted workflow
+    # re-bakes on the next conversation, not only the next day. Idempotent — rewrites
+    # only when the baked content changes. Bridges the plugin → workflow bare-name gap.
     ensure_workflow_installed()
+
+    cfg = _load_config()
+
+    # Explicit opt-outs — with an empty backlog (n == 0, checked below) these are the
+    # ONLY things that mark the nudge "done". No opt-out is ever inferred from a silent
+    # miss (that is the whole point of #5).
+    if cfg.get("nudge_disabled") is True:            # "off for good"
+        _log("gated (nudge disabled)")
+        _emit()
+    if _read_text(DISMISS_STAMP) == today:           # "not today"
+        _log("gated (dismissed today)")
+        _emit()
 
     # First run: no index yet → a short intro offering to build it, instead of a bulk
     # "N conversations pending" nudge (with no index, prepare.py counts the user's whole
-    # history). Once/day gated (above). Building the index switches this off naturally.
+    # history). Re-shown each new conversation until the index exists or the user opts
+    # out above — its natural "done" condition is the index getting built.
     if not _has_index():
-        try:
-            os.makedirs(DIGEST, exist_ok=True)
-            with open(STAMP, "w", encoding="utf-8") as fh:
-                fh.write(today)
-        except OSError:
-            pass
         _log("intro (no index yet)")
         _emit(
             "[convo-digest] 👋 First run — this plugin summarizes your finished Claude "
             "Code conversations into a local, searchable recall index (no API key; nothing "
-            "leaves your machine). Your index isn't built yet. Offer the user ONCE, as a "
-            "friendly one-liner, to run `/convo-digest:digest` to build it. If they have a "
-            "lot of history, offer a choice: build everything, or just recent (e.g. the "
-            "last week — the digest skill supports a windowed backfill that ignores the "
-            "rest). As PART OF that build, also ask (Yes/No) whether the digest may write "
-            "its generated titles back to each conversation's Claude Code transcript so "
-            "they show in the `claude --resume` picker — and persist the answer BEFORE the "
-            "build runs, so a backfill titles the whole history in one pass rather than "
-            "missing it (the digest skill covers this). If they decline or are mid-task, "
-            "drop it. (A separate one-time `/convo-digest:profile-repos` can also tag repos "
-            "work/personal for sharper recall — mention only if it comes up naturally, "
-            "don't pitch everything at once.)")
+            "leaves your machine). Your index isn't built yet. Before your other opening "
+            "remarks, you MUST offer the user (a friendly one-liner) to run "
+            "`/convo-digest:digest` to build it. If they have a lot of history, offer a "
+            "choice: build everything, or just recent (e.g. the last week — the digest "
+            "skill supports a windowed backfill that ignores the rest). As PART OF that "
+            "build, also ask (Yes/No) whether the digest may write its generated titles "
+            "back to each conversation's Claude Code transcript so they show in the `claude "
+            "--resume` picker — and persist the answer BEFORE the build runs, so a backfill "
+            "titles the whole history in one pass rather than missing it (the digest skill "
+            "covers this). If they decline, run `python3 <plugin>/src/index.py "
+            "--dismiss-nudge today` (or `off` to stop for good) so it doesn't re-ask; if "
+            "they ignore it, leave it to re-surface next conversation. (A separate one-time "
+            "`/convo-digest:profile-repos` can also tag repos work/personal for sharper "
+            "recall — mention only if it comes up naturally, don't pitch everything at once.)")
 
-    # cheap pending count (never let a hook failure block the session)
-    try:
-        proc = subprocess.run(
-            [sys.executable, os.path.join(SRC, "prepare.py"), "--count-only", "--index", INDEX],
-            capture_output=True, text=True, timeout=120)
-        n = int(json.loads(proc.stdout).get("changed", 0))
-    except Exception as e:
-        _log(f"error: {e}")
-        _emit()
-
-    # advance the stamp now so we don't nag again today (the COUNT uses the index
-    # watermark, not this stamp, so skipping the nudge never loses a convo)
-    try:
-        os.makedirs(DIGEST, exist_ok=True)
-        with open(STAMP, "w", encoding="utf-8") as fh:
-            fh.write(today)
-    except OSError:
-        pass
-
-    # Repo-profiling coverage — orthogonal to the pending count: repos with indexed
-    # history but no work/personal profile weaken recall, and (unlike pending convos)
-    # a re-digest never clears it. Computed alongside `n` so BOTH signals ride in one
-    # message — we never want two competing nudges (and never want profiling to be
-    # starved on busy days where there's always something to digest).
-    try:
-        proc = subprocess.run(
-            [sys.executable, os.path.join(SRC, "repos.py"), "unprofiled", "--index", INDEX],
-            capture_output=True, text=True, timeout=120)
-        m = int(json.loads(proc.stdout).get("count", 0))
-    except Exception as e:
-        _log(f"profile-check error: {e}")
-        m = 0
+    # Pending count (n) + unprofiled-repo count (m), cached so this per-session retry
+    # doesn't rescan every conversation. n == 0 is the backlog nudge's automatic "done".
+    n, m = _counts(today)
 
     # Title-writeback opt-in — tri-state in config.json. Undecided (key absent) or
-    # "not_now" → keep asking (rides the daily nudge like profiling); True/False are
-    # final and stay silent. Only reachable once an index exists (the no-index intro
-    # returns earlier), so we never ask before the first digest has run.
-    try:
-        titles_unset = _load_config().get("write_titles") in (None, "not_now")
-    except Exception as e:
-        _log(f"titles-check error: {e}")
-        titles_unset = False
+    # "not_now" → keep asking (rides the nudge like profiling); True/False are final and
+    # stay silent. Only reachable once an index exists (the no-index intro returns
+    # earlier), so we never ask before the first digest has run.
+    titles_unset = cfg.get("write_titles") in (None, "not_now")
 
     msg = _build_nudge(n, m, titles_unset)
     if msg is None:

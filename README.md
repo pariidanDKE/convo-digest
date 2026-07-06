@@ -17,8 +17,11 @@ Three skills (namespaced under `convo-digest`):
 | `/convo-digest:recall` | Find a relevant past conversation for what you're starting on, and offer to resume it. |
 | `/convo-digest:digest-archive` | Review recent conversations and archive the ones you're done with so they stop cluttering recall. |
 
-Plus a once-a-day **SessionStart nudge**: on your first session of the day, if
-finished conversations aren't indexed yet, it offers to refresh.
+Plus a **SessionStart nudge**: when finished conversations aren't indexed yet, it
+offers to refresh (once per conversation). Because a SessionStart hook can only reach
+you *through the model relaying it*, the offer is self-healing — it keeps re-surfacing
+each new conversation until the backlog is actually cleared or you opt out ("not today"
+or off for good), so a silently-dropped offer isn't lost for the day.
 
 ## Requirements
 

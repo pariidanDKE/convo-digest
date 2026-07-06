@@ -31,10 +31,16 @@ PROMPT_VERSION = "v1"
 SCHEMA_VERSION = "4.7"
 SUMMARY_FIELDS = ("title", "topics", "gist", "status", "unresolved", "key_entities")
 
-# Shared plugin config (tri-state `write_titles`: True | False | "not_now" | absent).
+# Shared plugin config (tri-state `write_titles`: True | False | "not_now" | absent;
+# bool `nudge_disabled` for "stop the daily nudge for good").
 # No dedicated module: the hook reads it inline, we read it via _load_json below, and
 # --set-write-titles writes it via _dump_json — one small key doesn't warrant config.py.
 CONFIG_PATH = os.path.expanduser("~/.claude/digest/config.json")
+# "Not today" dismiss stamp for the freshness nudge — a local date the hook compares
+# against today. Paired with config `nudge_disabled` (the permanent off switch), these
+# are the ONLY explicit opt-outs; the hook no longer marks the nudge done on a mere
+# attempt (see freshness_hook.py, issue #5).
+NUDGE_DISMISS_STAMP = os.path.expanduser("~/.claude/digest/nudge_dismissed_date")
 
 
 def _ts(s: str | None) -> datetime | None:
@@ -444,6 +450,10 @@ def main() -> int:
                     help="force NOT writing titles back (overrides config)")
     ap.add_argument("--set-write-titles", choices=["yes", "no", "not_now"],
                     help="persist the title-writeback opt-in to config.json and exit")
+    ap.add_argument("--dismiss-nudge", choices=["today", "off"],
+                    help="persist a freshness-nudge opt-out and exit: 'today' stamps a "
+                         "one-day dismiss (asks again tomorrow if a backlog remains); "
+                         "'off' sets config nudge_disabled to stop the daily nudge for good")
     ap.add_argument("--backfill-titles", action="store_true",
                     help="write titles for ALL already-indexed convos (retro-title "
                          "history the normal changed-only digest would skip); needs --index")
@@ -455,6 +465,19 @@ def main() -> int:
         cfg["write_titles"] = val
         _dump_json(CONFIG_PATH, cfg)
         print(json.dumps({"write_titles": val}))
+        return 0
+
+    if args.dismiss_nudge:
+        if args.dismiss_nudge == "off":                       # permanent: stop for good
+            cfg = _load_json(CONFIG_PATH)
+            cfg["nudge_disabled"] = True
+            _dump_json(CONFIG_PATH, cfg)
+        else:                                                 # "today": one-day dismiss
+            today = datetime.now(timezone.utc).astimezone().date().isoformat()
+            os.makedirs(os.path.dirname(NUDGE_DISMISS_STAMP), exist_ok=True)
+            with open(NUDGE_DISMISS_STAMP, "w", encoding="utf-8") as fh:
+                fh.write(today)
+        print(json.dumps({"dismiss_nudge": args.dismiss_nudge}))
         return 0
 
     if args.backfill_titles:
