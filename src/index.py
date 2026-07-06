@@ -391,6 +391,40 @@ def run_batch_glob(pattern: str, index_path: str, *,
             "files": len(files)}
 
 
+def backfill_titles(index_path: str) -> dict:
+    """Write each already-indexed convo's digest title back to its transcript, WITHOUT
+    re-summarizing. A normal digest only titles *changed* convos (they're the only ones
+    that re-enter _merge_items), so history indexed before the title feature — or before
+    a late opt-in — would otherwise never get a title. This one-shot pass covers them.
+
+    Same fill-or-ours policy and provenance tracking as the inline writer, so it's
+    idempotent and never clobbers a foreign (human / CC-auto) title. Explicit command:
+    it does NOT gate on the write_titles opt-in (running it is the consent) and does not
+    modify config. Returns counts: titled (newly written), current (already ours),
+    skipped (foreign title, or missing transcript/title)."""
+    index = _load_json(index_path)
+    titled, current, skipped = 0, 0, 0
+    for rec in index.values():
+        src, sid = rec.get("source"), rec.get("id")
+        title = (rec.get("summary") or {}).get("title")
+        if not (src and title and sid and os.path.exists(src)):
+            skipped += 1
+            continue
+        prev = rec.get("provenance", {}).get("title_written")
+        before = _read_last_custom_title(src)
+        wrote = _write_session_title(src, sid, title, prev)
+        if wrote is None:               # foreign title present — left untouched
+            skipped += 1
+        elif before == title:           # already current — no append happened
+            current += 1
+        else:                           # newly written (or refreshed our own)
+            rec.setdefault("provenance", {})["title_written"] = wrote
+            titled += 1
+    _dump_json(index_path, index)
+    return {"titled": titled, "current": current, "skipped": skipped,
+            "index_size": len(index)}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Assemble index records from work + summary.")
     ap.add_argument("--work", help="per-convo work JSON from prepare.py (single mode)")
@@ -410,6 +444,9 @@ def main() -> int:
                     help="force NOT writing titles back (overrides config)")
     ap.add_argument("--set-write-titles", choices=["yes", "no", "not_now"],
                     help="persist the title-writeback opt-in to config.json and exit")
+    ap.add_argument("--backfill-titles", action="store_true",
+                    help="write titles for ALL already-indexed convos (retro-title "
+                         "history the normal changed-only digest would skip); needs --index")
     args = ap.parse_args()
 
     if args.set_write_titles:
@@ -418,6 +455,12 @@ def main() -> int:
         cfg["write_titles"] = val
         _dump_json(CONFIG_PATH, cfg)
         print(json.dumps({"write_titles": val}))
+        return 0
+
+    if args.backfill_titles:
+        if not args.index:
+            ap.error("--backfill-titles requires --index")
+        print(json.dumps(backfill_titles(args.index)))
         return 0
 
     if args.batch_glob:
