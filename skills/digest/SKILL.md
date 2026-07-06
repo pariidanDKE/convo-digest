@@ -33,6 +33,43 @@ trivial={c.get('trivial',0)} skipped under token floor)\")"
 - Otherwise report the count and note this will spend tokens + take a few
   minutes (each whole-tier convo is one Haiku summarizer agent).
 
+## 1b. Resolve the title-writeback opt-in — BEFORE building
+The digest can write its generated title back to each conversation's Claude Code
+transcript so it shows as the title in the `claude --resume` picker. This is
+opt-in, persisted in `~/.claude/digest/config.json` as tri-state `write_titles`
+(`true` / `false` / `"not_now"` / absent).
+
+**Resolve this before running the workflow in step 2** — the writeback happens
+*inside* the summarize→merge pass, so a title is written only for convos processed
+*after* the opt-in is `true`. Setting it afterward does nothing for convos already
+merged (they're unchanged, so a re-digest skips them). This matters most on a big
+first-run backfill: opt in first and the whole history gets titled in one pass;
+opt in after and none of it does (you'd then need `--backfill-titles`, below).
+
+- If `config.json` has no `write_titles` key (or the SessionStart hook flags it
+  unset), ask the user **once**, Yes/No: *"Want the digest to write its generated
+  titles back so they show in your `claude --resume` picker? It only fills in
+  sessions without a title and never overwrites ones you set yourself."*
+- Persist the answer (don't hand-write the JSON) **before** step 2:
+  ```bash
+  python3 ${CLAUDE_PLUGIN_ROOT}/src/index.py --set-write-titles <yes|no|not_now>
+  ```
+- When `true`, step 2's `index.py` merge writes titles automatically — the workflow
+  needs no extra args. **Fill-or-ours** policy: only sessions with no `custom-title`,
+  or one the digest itself wrote before (tracked in `provenance.title_written`); never
+  a human or Claude-Code-auto title.
+
+### Retro-titling already-indexed convos (`--backfill-titles`)
+A normal digest only titles *changed* convos. For history indexed before the title
+feature, or when the user opts in *after* building, run a one-shot backfill that
+titles every indexed convo from its existing record (no re-summarize, same
+fill-or-ours policy, idempotent):
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/src/index.py --backfill-titles --index ~/.claude/digest/index.json
+```
+Returns `{titled, current, skipped}`. Offer this when a user opts in and already has
+an index — otherwise their existing conversations would never get titles.
+
 ## 2. Drain in batches
 Run the digest workflow with `{limit: 20}` and **repeat until it reports
 `summarized: 0`** — each run advances the change-detector, so successive runs
@@ -71,30 +108,6 @@ Sum the `indexed` counts across batches and tell the user how many conversations
 were added/updated, and the new index size. Mention any **over-cap (sampler-tier)
 convos that were skipped** — those need the (deferred) horizontal sampler and are
 not yet in the index.
-
-## Title-writeback opt-in (first run)
-The digest already names every conversation. It can also write that name back to
-each conversation's Claude Code transcript so it shows up as the title in the
-`claude --resume` picker. This is **opt-in** and persisted in
-`~/.claude/digest/config.json` as a tri-state `write_titles` (`true` / `false` /
-`"not_now"` / absent).
-
-- If the SessionStart hook says the opt-in is unset (or you see no `write_titles`
-  key in `config.json`), ask the user **once**, Yes/No: *"Want the digest to write
-  its generated titles back so they show in your `claude --resume` picker? It only
-  fills in sessions without a title and never overwrites ones you set yourself."*
-- Persist their answer with a single command (don't hand-write the JSON):
-  ```bash
-  python3 ${CLAUDE_PLUGIN_ROOT}/src/index.py --set-write-titles <yes|no|not_now>
-  ```
-  Yes enables it from the next digest on; No stops the ask for good; not_now
-  re-offers later.
-
-When `write_titles` is `true`, the Index step's `index.py` merge writes titles
-automatically — the workflow needs no extra args. **Fill-or-ours** policy: it only
-titles sessions with no existing `custom-title`, or refreshes one the digest itself
-wrote before (tracked in `provenance.title_written`); it never clobbers a human or
-Claude-Code-auto title.
 
 ## Notes
 - Idempotent: re-running when nothing changed is a no-op (`changed == 0`).

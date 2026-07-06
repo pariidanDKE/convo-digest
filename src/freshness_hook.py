@@ -190,10 +190,14 @@ def main() -> None:
             "friendly one-liner, to run `/convo-digest:digest` to build it. If they have a "
             "lot of history, offer a choice: build everything, or just recent (e.g. the "
             "last week — the digest skill supports a windowed backfill that ignores the "
-            "rest). If they decline or are mid-task, drop it. (Once the index exists, a "
-            "separate one-time `/convo-digest:profile-repos` can tag repos work/personal "
-            "for sharper recall — mention only if it comes up naturally, don't pitch both "
-            "at once.)")
+            "rest). As PART OF that build, also ask (Yes/No) whether the digest may write "
+            "its generated titles back to each conversation's Claude Code transcript so "
+            "they show in the `claude --resume` picker — and persist the answer BEFORE the "
+            "build runs, so a backfill titles the whole history in one pass rather than "
+            "missing it (the digest skill covers this). If they decline or are mid-task, "
+            "drop it. (A separate one-time `/convo-digest:profile-repos` can also tag repos "
+            "work/personal for sharper recall — mention only if it comes up naturally, "
+            "don't pitch everything at once.)")
 
     # cheap pending count (never let a hook failure block the session)
     try:
