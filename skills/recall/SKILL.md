@@ -27,9 +27,9 @@ search terms — roughly 4–8 words. Pull in:
   "login" → also add "auth"; "deploy" → "deployment release").
 
 If the message is vague ("let's keep going", "continue where we left off") there
-may be *no* good content words — that's fine. Pass an empty or tiny query; the
-script falls back to recency within the current project, which is the right
-behavior for "what was I just doing here".
+may be *no* good content words — that's fine. Pass an empty or tiny query; ranking
+then leans on recency plus the same-repo boost, so the current repo's most recent
+work floats to the top — the right behavior for "what was I just doing here".
 
 ### 2. Run the search
 Get the current directory and run the script (it prints JSON):
@@ -41,9 +41,12 @@ python3 ${CLAUDE_PLUGIN_ROOT}/src/recall.py \
   --query "YOUR EXTRACTED TERMS"
 ```
 
-- `--cwd "$(pwd)"` applies the project filter. If the current repo has no
-  history the script reports `"scope": "global-fallback"` and searches
-  everything — note that to the user if it happens.
+- `--cwd "$(pwd)"` enables the **soft** project scope (`"scope": "project-boosted"`):
+  all repos are searched, but current-repo records get a ranking boost. So a strong
+  match from another repo can still surface — each candidate carries `same_project`
+  (true/false). When you offer a cross-repo result, say where it's from (e.g. "from
+  your LocalAi repo") so the user isn't surprised.
+- Add `--strict-project` to hard-scope to the current repo only (old behavior).
 - Add `--limit N` to widen/narrow (default 10).
 
 ### 3. Judge and offer
