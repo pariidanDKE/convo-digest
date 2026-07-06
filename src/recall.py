@@ -4,8 +4,10 @@
 The model does the *thinking* (extract a query from the user's message + session
 context, then judge the candidates); this script does the deterministic *matching*:
 
-  1. project filter   — keep records for the current repo (cwd), graceful fallback
-                        to all projects when the repo has no history.
+  1. project scope    — rank ALL projects by default and boost same-repo records
+                        (soft scope), so current work floats up without silently
+                        hiding a stronger match from a repo you can't remember.
+                        --strict-project restores a hard current-repo-only filter.
   2. BM25 rank        — over the DISTILLED record only (title + topics + gist +
                         key_entities + facet keys), never the raw transcript.
   3. boosts           — recency (recent work is likelier what you mean) + an exact
@@ -35,6 +37,11 @@ RECENCY_WEIGHT = 0.2        # how much "recent" counts vs lexical match
 RECENCY_HALF_LIFE_DAYS = 30.0
 EXACT_WEIGHT = 0.4          # bump per query term that hits a facet key exactly
 TITLE_BOOST = 2             # title terms count this many times in the doc
+# Same-repo affinity as a SOFT boost, not a hard filter (see search()): sits between
+# recency (0.2) and an exact facet hit (0.4) — current-repo work floats up, but a
+# clearly-stronger cross-repo match (BM25 better by >this) can still surface instead
+# of being silently hidden. Untuned but deliberate; --strict-project restores a hard scope.
+PROJECT_WEIGHT = 0.3
 
 _STOP = {
     "the", "a", "an", "and", "or", "but", "if", "then", "to", "of", "in", "on",
@@ -96,7 +103,8 @@ def _norm_cwd(p: str | None) -> str:
 def search(index: dict, query: str, *, cwd: str | None = None, limit: int = 10,
            strict_project: bool = False, now: datetime | None = None,
            recency_weight: float = RECENCY_WEIGHT, exact_weight: float = EXACT_WEIGHT,
-           half_life: float = RECENCY_HALF_LIFE_DAYS) -> dict:
+           half_life: float = RECENCY_HALF_LIFE_DAYS,
+           project_weight: float = PROJECT_WEIGHT) -> dict:
     now = now or datetime.now(timezone.utc)
     # drop archived records and seed-state stubs (no `summary`) up front — they never
     # appear in recall (curation lives on the record now; absent = neutral/searchable)
@@ -105,17 +113,19 @@ def search(index: dict, query: str, *, cwd: str | None = None, limit: int = 10,
     keys = [k for k, _ in kept]
     records = [r for _, r in kept]
 
-    # --- 1. project filter (graceful fallback unless strict) ---
+    # --- 1. project scope ---
+    # Default: rank ALL projects, and boost same-repo records in step 3 (soft scope) —
+    # so current-repo work floats up without silently hiding a clearly-stronger match
+    # from another repo (the case you often can't remember the repo for). --strict-project
+    # restores the old hard filter (only this repo; empty if it has no history).
+    ncwd = _norm_cwd(cwd) if cwd else ""
     scope = "all"
     if cwd:
-        ncwd = _norm_cwd(cwd)
-        in_proj = [r for r in records if _norm_cwd(r.get("cwd")) == ncwd]
-        if in_proj:
-            records, scope = in_proj, "project"
-        elif strict_project:
-            records, scope = [], "project"
+        if strict_project:
+            records = [r for r in records if _norm_cwd(r.get("cwd")) == ncwd]
+            scope = "project"
         else:
-            scope = "global-fallback"  # repo has no history → search everything
+            scope = "project-boosted"
     if not records:
         return {"scope": scope, "query": query, "count": 0, "candidates": []}
 
@@ -156,13 +166,16 @@ def search(index: dict, query: str, *, cwd: str | None = None, limit: int = 10,
         age = _age_days(r.get("provenance", {}).get("last_ts"), now)
         recency = 0.5 ** (age / half_life) if age is not None else 0.0
         exact = len(qset & _exact_keys(r)) if qset else 0
-        final = raw / bmax + recency_weight * recency + exact_weight * exact
+        same_project = bool(cwd) and _norm_cwd(r.get("cwd")) == ncwd
+        final = (raw / bmax + recency_weight * recency + exact_weight * exact
+                 + project_weight * same_project)
         s = r.get("summary", {})
         out.append({
             "id": r.get("id"),
             "resume_id": r.get("resume_id") or r.get("id"),
             "project": r.get("project"),
             "cwd": r.get("cwd"),
+            "same_project": same_project,   # skill can label "(this project)" vs the repo name
             "title": s.get("title"),
             "status": s.get("status"),
             "gist": s.get("gist"),
