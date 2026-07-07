@@ -71,9 +71,30 @@ Returns `{titled, current, skipped}`. Offer this when a user opts in and already
 an index — otherwise their existing conversations would never get titles.
 
 ## 2. Drain in batches
-Run the digest workflow with `{limit: 20}` and **repeat until it reports
-`summarized: 0`** — each run advances the change-detector, so successive runs
-pick up where the last stopped (checkpointed; a crash mid-drain loses nothing).
+
+**Preflight — the digest runs as a dynamic workflow.** Before anything else in this
+step, confirm you actually have the **`Workflow` tool** available. If you don't, this
+user has dynamic workflows disabled (the tool is simply *absent* from your toolset, not
+present-but-erroring). The digest's summarize→index orchestration only runs as a
+workflow — do **not** try to hand-roll it with individual agent calls. Stop, tell the
+user how to enable dynamic workflows, and have them re-run `/convo-digest:digest`:
+
+- Turn it on via `/config` → **Dynamic workflows** (Pro/CLI toggle), **or**
+- Ensure `~/.claude/settings.json` (or project `.claude/settings.json`) does **not** set
+  `"disableWorkflows": true` — remove the key or set it to `false`, **and**
+- Ensure the `CLAUDE_CODE_DISABLE_WORKFLOWS` env var isn't set to `1`, **and**
+- Requires Claude Code **v2.1.154+** — upgrade if older.
+- Settings/env changes take effect on the **next session** — have them restart, then retry.
+- Docs: https://code.claude.com/docs/en/workflows.md
+
+(This is distinct from the "unknown workflow name" case below: there the `Workflow` tool
+*is* present but the `digest` name hasn't been installed yet — a first-session ordering
+issue, fixed by starting a new session, not by enabling anything.)
+
+Once the `Workflow` tool is available, run the digest workflow with `{limit: 20}` and
+**repeat until it reports `summarized: 0`** — each run advances the change-detector, so
+successive runs pick up where the last stopped (checkpointed; a crash mid-drain loses
+nothing).
 
 > Run the workflow via the Workflow tool as `Workflow({ name: "digest", args: {"limit": 20} })`.
 > Use the **BARE** name `digest` — do NOT namespace it as `convo-digest:digest`, and do
