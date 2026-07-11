@@ -42,6 +42,27 @@ Then start a new session (the SessionStart hook installs the summarization workf
 into `~/.claude/workflows/` on first run). After that, just say *"refresh the
 digest"* or run `/convo-digest:digest`.
 
+## The flow
+
+```mermaid
+flowchart TD
+    N["🔔 SessionStart nudge<br/><i>“N finished convos aren't indexed — refresh?”</i>"]
+    T[("📄 Local transcripts<br/>~/.claude/projects/…/*.jsonl")]
+    P["<b>Prepare</b> · no model calls<br/>detect changed convos, strip to text,<br/>tier: whole / over-cap / trivial"]
+    S["<b>Summarize</b> · background workflow<br/>one small Haiku agent per convo<br/>→ 6-field record<br/>(title · topics · gist · status · unresolved · entities)"]
+    I[("🗂 Recall index<br/>~/.claude/digest/index.json")]
+    R["🔍 <b>/recall</b> — pull<br/>search past work,<br/>offer to resume it"]
+    A["🧹 <b>/digest-archive</b> — push<br/>morning triage: archive<br/>what you're done with"]
+
+    N -. offers /digest .-> P
+    T --> P --> S --> I
+    I --> R
+    I --> A
+```
+
+Everything runs locally, incrementally, and checkpointed — a digest run only touches
+conversations that changed since the last one.
+
 ## How it works
 
 - Reads your local Claude Code transcripts (`~/.claude/projects/**/*.jsonl`), strips

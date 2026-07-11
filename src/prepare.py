@@ -248,7 +248,8 @@ def main() -> int:
     convos = []
     n_whole = 0
     counts = {"files": 0, "sidechain_or_empty": 0, "unchanged": 0, "changed": 0,
-              "trivial": 0, "active_skipped": 0, "skipped_old": 0, "seeded": 0}
+              "trivial": 0, "trivial_stubbed": 0, "active_skipped": 0,
+              "skipped_old": 0, "seeded": 0}
     now = time.time()
 
     for f in glob.glob(os.path.join(args.projects, "**", "*.jsonl"), recursive=True):
@@ -342,6 +343,16 @@ def main() -> int:
                     }, vf, ensure_ascii=False, indent=1)
         else:
             counts["trivial"] += 1
+            # Stamp a summary-less stub so the change-detector treats this trivial
+            # as handled from now on. Without it a trivial is "changed" forever: the
+            # workflow never summarizes it (so index.py never stamps it) and the
+            # freshness hook counts it every scan — so the backlog can never reach 0
+            # and the SessionStart nudge re-fires indefinitely. Same stub mechanism
+            # as --seed-rest / --seed-state; recall ignores summary-less records.
+            if last_ts is not None and key not in index:
+                index[key] = {"id": cid, "project": tr.facets.project, "source": f,
+                              "trivial": True, "provenance": {"last_ts": last_ts}}
+                counts["trivial_stubbed"] += 1
         convos.append({
             "key": key, "id": cid, "project": tr.facets.project, "source": f,
             "work_path": work_path, "view_path": view_path, "tier": tier,
@@ -352,9 +363,10 @@ def main() -> int:
             if args.limit and n_whole >= args.limit:
                 break  # batched draining: enough whole-tier convos for this run
 
-    # Persist the stubs seeded for excluded-old convos (deliberate, stub-only write —
-    # same semantics as --seed-state, scoped to < cutoff; never a summary).
-    if args.seed_rest and counts["seeded"]:
+    # Persist stubs written this run (deliberate, stub-only write — same semantics
+    # as --seed-state; never a summary): --seed-rest excluded-old convos, plus the
+    # trivial-floor stubs that keep the change-detector from re-flagging them forever.
+    if counts["seeded"] or counts["trivial_stubbed"]:
         os.makedirs(os.path.dirname(args.index) or ".", exist_ok=True)
         with open(args.index, "w", encoding="utf-8") as fh:
             json.dump(index, fh, ensure_ascii=False, indent=2)

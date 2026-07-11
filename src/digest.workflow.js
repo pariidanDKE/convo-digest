@@ -216,12 +216,27 @@ const writes = await parallel(chunks.map((chunk, i) => () => agent(
   { schema: CHUNK_SCHEMA, agentType: RUNNER_AGENT, model: MODEL,
     label: `batch:${i}`, phase: 'Index' }
 )))
-const wroteCount = writes.filter(Boolean).reduce((n, w) => n + (w.count || 0), 0)
+const wrote = writes.filter(Boolean)
+const wroteCount = wrote.reduce((n, w) => n + (w.count || 0), 0)
 if (wroteCount < ok.length) log(`Index: chunk-writes recorded ${wroteCount}/${ok.length} (merge will reconcile)`)
+
+// The chunk-write agents don't necessarily share one cwd — a session can carry several
+// working directories (primary + additionalDirectories), and parallel agents scatter
+// across them. A lone RELATIVE glob run by the merge agent would then see only the
+// chunks in ITS cwd and silently orphan the rest: never merged, never counted as
+// `failed`, and their change-detector never advances, so they get re-summarized every
+// run (burning tokens) until a chunk happens to land where the merge looks. Fix: pass
+// each chunk's ABSOLUTE path (echoed by its writer) explicitly, plus the relative glob
+// as a cwd-local fallback for any writer that didn't report a path. index.py unions +
+// dedupes them (§4.5).
+const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`
+const mergePatterns = [shq(`${BATCH_PREFIX}*.json`)]
+  .concat(wrote.map(w => w.path).filter(Boolean).map(shq))
+  .join(' ')
 
 const idx = await agent(
   `Run this single command and return its stdout JSON (one object):\n` +
-  `  python3 ${SRC}/index.py --batch-glob '${BATCH_PREFIX}*.json' --index ${INDEX} --model haiku-4-5 --cleanup\n` +
+  `  python3 ${SRC}/index.py --batch-glob ${mergePatterns} --index ${INDEX} --model haiku-4-5 --cleanup\n` +
   `Return the parsed object unchanged.`,
   { schema: INDEX_RESULT_SCHEMA, agentType: RUNNER_AGENT, model: MODEL, label: 'merge', phase: 'Index' }
 )

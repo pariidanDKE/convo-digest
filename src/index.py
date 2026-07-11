@@ -358,23 +358,36 @@ def run_batch(batch_path: str, index_path: str, *,
     return {"written": written, "failed": failed, "index_size": len(index)}
 
 
-def run_batch_glob(pattern: str, index_path: str, *,
+def run_batch_glob(patterns, index_path: str, *,
                    model: str = "haiku-4-5", cleanup: bool = False,
                    write_titles: bool | None = None) -> dict:
-    """Merge MANY small batch files matching `pattern` (each a JSON array — or a lone
-    object — of {key, work_path, summary}) into the index in one deterministic pass.
+    """Merge MANY small batch files (each a JSON array — or a lone object — of
+    {key, work_path, summary}) into the index in one deterministic pass.
+
+    `patterns` is one or more globs AND/OR literal file paths (a literal existing path
+    globs to itself). They are unioned + deduped, so callers can pass the exact absolute
+    paths of the chunk files alongside a relative fallback glob.
 
     This is the robust replacement for one agent re-serializing the whole batch: the
     workflow has each chunk written by a separate (parallel) agent into its own small
     file, then this reads them all with **zero re-transcription** and merges. A chunk
     an agent mangled fails to parse → recorded in `failed`, the rest still land, and
     the un-merged convos self-heal next run (their change-detector never advanced).
-    `write_titles=None` reads the persisted opt-in.
+
+    Passing explicit absolute paths (not just a bare relative glob) is what makes this
+    correct when the chunk-writer agents don't share one cwd: a lone relative glob run
+    by the merge process only sees files in ITS cwd, silently orphaning chunks written
+    elsewhere. `write_titles=None` reads the persisted opt-in.
     """
     counter = TK.default_counter()
     repos = R.load_repos()
     wt = _resolve_write_titles(write_titles)
-    files = sorted(glob.glob(pattern))
+    if isinstance(patterns, str):
+        patterns = [patterns]
+    # Dedup by real path, not the raw string: the same chunk can arrive via both the
+    # relative fallback glob ('_digest_batch_0.json') and its absolute path, which are
+    # different strings for one file — reading it twice would double-count `written`.
+    files = sorted({os.path.realpath(f) for pat in patterns for f in glob.glob(pat)})
     items, failed = [], []
     for f in files:
         try:
@@ -437,8 +450,11 @@ def main() -> int:
     ap.add_argument("--summary", help="JSON with the 6 model fields (single mode)")
     ap.add_argument("--out", help="write single record here (default: stdout)")
     ap.add_argument("--batch", help="JSON array of {key, work_path, summary} (batch mode)")
-    ap.add_argument("--batch-glob", help="glob of many small batch files to merge in one "
-                                         "deterministic pass (chunked-write mode)")
+    ap.add_argument("--batch-glob", nargs="+", metavar="PATTERN",
+                    help="one or more globs and/or explicit paths of small batch files to "
+                         "merge in one deterministic pass (chunked-write mode); paths are "
+                         "unioned + deduped, so pass each chunk's absolute path plus a "
+                         "relative fallback glob when writers may not share a cwd")
     ap.add_argument("--index", help="index store to merge into (batch mode)")
     ap.add_argument("--cleanup", action="store_true",
                     help="unlink the consumed batch file(s) after merging (keeps cwd clean)")
