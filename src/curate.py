@@ -154,6 +154,88 @@ def recent(index: dict, days: int = 2, marker: str | None = None,
             "candidates": out}
 
 
+def _is_trivial_stub(r: dict) -> bool:
+    """The deletable shape: tiered trivial by prepare.py AND never summarized.
+    The no-summary side is an invariant guard, not a stamped value — anything a
+    summarizer ever touched is permanently off-limits to reclaim, even if a
+    future merge path wrongly carried the `trivial` flag onto it."""
+    return bool(r.get("trivial")) and not r.get("summary")
+
+
+def deletable(index: dict, min_age_days: float = 2.0,
+              now: datetime | None = None) -> dict:
+    """Disk-reclaim candidates: trivial stubs idle >= `min_age_days`.
+
+    Trivial stubs (< the token floor, never summarized — see prepare.py) are recall
+    noise by construction; the age gate is the safety margin for the one real
+    false-positive: a one-liner from yesterday the user still means to resume. The
+    default mirrors the archive walk-through's 2-day window so one triage session
+    sees a coherent horizon. Oldest first. Returns {count, total_bytes, candidates}.
+    """
+    now = now or datetime.now(timezone.utc)
+    out, total = [], 0
+    for key, r in index.items():
+        if not _is_trivial_stub(r):
+            continue
+        last = _parse_ts(r.get("provenance", {}).get("last_ts"))
+        if not last:
+            continue  # no timestamp → age unknowable → never offer for deletion
+        age = (now - last).total_seconds() / 86400
+        if age < min_age_days:
+            continue
+        src = r.get("source") or ""
+        try:
+            size = os.path.getsize(src)
+        except OSError:
+            size = 0  # transcript already gone; reclaim would just drop the record
+        out.append({"id": r.get("id"), "key": key, "project": r.get("project"),
+                    "source": src, "age_days": round(age, 1), "bytes": size})
+        total += size
+    out.sort(key=lambda c: -c["age_days"])
+    return {"count": len(out), "total_bytes": total,
+            "min_age_days": min_age_days, "candidates": out}
+
+
+def reclaim(index: dict, refs: list[str], *, dry_run: bool = False) -> dict:
+    """Hard-delete confirmed junk: unlink each transcript AND drop its index record
+    (a recall record pointing at a deleted transcript would be a dead resume link).
+
+    Guarded: only trivial summary-less stubs are ever deleted — a ref resolving to
+    a summarized or unknown record is refused/reported, so a stray id in a batch
+    confirm cannot take out a real conversation. Irreversible by design (no trash
+    dir); the caller owns the confirm step. Caller persists the index after."""
+    deleted, refused, missing, failed = [], [], [], []
+    bytes_freed = 0
+    for ref in refs:
+        key = _find_key(index, ref)
+        if not key:
+            missing.append(ref)
+            continue
+        r = index[key]
+        if not _is_trivial_stub(r):
+            refused.append({"ref": ref, "key": key,
+                            "why": "not a trivial summary-less stub"})
+            continue
+        src = r.get("source") or ""
+        try:
+            size = os.path.getsize(src)
+        except OSError:
+            size = 0
+        if not dry_run:
+            try:
+                os.unlink(src)
+            except FileNotFoundError:
+                pass  # already gone; still drop the stale record below
+            except OSError as e:
+                failed.append({"ref": ref, "key": key, "error": str(e)})
+                continue  # transcript survived → keep the record too
+            del index[key]
+        deleted.append({"id": r.get("id"), "key": key, "source": src, "bytes": size})
+        bytes_freed += size
+    return {"deleted": deleted, "refused": refused, "missing": missing,
+            "failed": failed, "bytes_freed": bytes_freed, "dry_run": dry_run}
+
+
 def migrate(index: dict, legacy_path: str) -> int:
     """One-time fold of a legacy curation.json into the index records (#13). Returns
     the number of records that got an archive flag carried over."""
@@ -181,6 +263,17 @@ def main() -> int:
                     help="advance the review marker to TS (ISO) and exit")
     ap.add_argument("--migrate", metavar="CURATION_JSON", nargs="?", const=CURATION,
                     help="one-time: fold a legacy curation.json into the index and exit")
+    ap.add_argument("--list-deletable", action="store_true",
+                    help="list disk-reclaim candidates: trivial never-summarized stubs "
+                         "idle >= --min-age-days (with transcript byte sizes)")
+    ap.add_argument("--min-age-days", type=float, default=2.0,
+                    help="age gate for --list-deletable (default 2, mirroring --days)")
+    ap.add_argument("--reclaim", nargs="+", metavar="REF",
+                    help="IRREVERSIBLE: delete the transcripts of these confirmed "
+                         "trivial stubs (keys or ids) off disk and drop their index "
+                         "records; refuses anything with a summary")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --reclaim: report what would be deleted, delete nothing")
     args = ap.parse_args()
 
     if args.mark_reviewed:
@@ -198,6 +291,18 @@ def main() -> int:
     if args.recent:
         print(json.dumps(recent(index, days=args.days,
                                 marker=read_marker(args.marker)), ensure_ascii=False))
+        return 0
+
+    if args.list_deletable:
+        print(json.dumps(deletable(index, min_age_days=args.min_age_days),
+                         ensure_ascii=False))
+        return 0
+
+    if args.reclaim:
+        res = reclaim(index, args.reclaim, dry_run=args.dry_run)
+        if not args.dry_run and res["deleted"]:
+            _dump(args.index, index)
+        print(json.dumps(res, ensure_ascii=False))
         return 0
 
     if args.auto:

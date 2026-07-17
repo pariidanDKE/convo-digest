@@ -54,7 +54,29 @@ python3 .../src/curate.py --mark-reviewed "<candidates[0].last_ts>"
 Advance the marker **even if the user archived nothing** — they reviewed the
 batch; leaving it un-advanced would re-show the same convos next time.
 
-## 4. Offer to jump in (optional)
+## 4. Reclaim disk (optional, destructive)
+After the archive pass, check for junk transcripts worth deleting off disk:
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/src/curate.py --list-deletable
+```
+Candidates are **trivial stubs**: convos under the token floor (one-liner probes,
+aborted runs) that were never summarized and have been idle ≥ 2 days. If
+`count == 0`, skip this step silently — say nothing.
+
+Otherwise offer ONE batch confirm: show the count and human-readable
+`total_bytes` ("N tiny finished convos · X KB"), list each candidate on one line
+(`project` · `age_days`d · `bytes`), and ask **"Delete these off disk? (yes/no)"**.
+Make clear this is **not** archiving: it permanently deletes the transcripts —
+`claude --resume` for them is gone forever. On yes:
+```bash
+python3 .../src/curate.py --reclaim <id> <id> ...
+```
+Report `bytes_freed`. On no (or partial picks — the user can name numbers to
+keep), reclaim only what they confirmed, or nothing. Never delete without the
+explicit yes. `--dry-run` previews; the command itself refuses anything with a
+summary, so a stray id cannot delete a real conversation.
+
+## 5. Offer to jump in (optional)
 If one candidate is clearly where the user wants to continue, offer the resume
 artifact for it exactly as `/recall` does (detect terminal vs VS Code, emit
 `claude --resume <id>` or the `vscode://` link — see the recall skill's §3 table).
@@ -65,6 +87,9 @@ artifact for it exactly as `/recall` does (detect terminal vs VS Code, emit
 - Archiving only re-ranks *our* recall (SPEC §5) — it does **not** touch the
   conversation transcript or Claude Code's own session list. Safe and reversible:
   `curate.py --unarchive <id>` clears it.
+- **Reclaim (§4) is the opposite**: irreversible, off-disk deletion — but scoped
+  to trivial never-summarized stubs only, gated on age, and always behind the
+  user's explicit batch confirm.
 - This sets the `curation` flag on the record + advances the marker; it never
   touches summaries, and `index.py` preserves the flag, so a digest re-run won't
   clobber your choices.
