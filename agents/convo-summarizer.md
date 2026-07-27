@@ -23,7 +23,7 @@ Guidance per field:
   never generic filler like "Debugging session", "Code help", or "Various
   tasks". If the conversation spans several subjects, title the most recent
   significant one. If the conversation is organised around a single dominant
-  ticket code — a Uffective Todo, ADO work item, GitHub issue, Jira key, any
+  ticket code — a Todo, ADO work item, GitHub issue, Jira key, any
   `<system>#<id>` — lead with the bare code and a colon: `65154: Azure AI Search
   embedding endpoint migration`. Bare code only — no "Todo"/"#" prefix. Leading
   position is deliberate: titles are clamped from the tail, so a leading code
