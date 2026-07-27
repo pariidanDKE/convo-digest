@@ -41,6 +41,11 @@ def enumerate_repos(index_path: str) -> list[dict]:
         index = json.load(fh)
     by: dict[str, list[dict]] = {}
     for r in index.values():
+        # Trivial stubs (sub-500-token convos) are written with a reduced shape —
+        # no context/cwd/summary — so they can't map to a repo. Skip them; the
+        # downstream sort key and sample fields all assume the full record shape.
+        if "context" not in r:
+            continue
         by.setdefault(r.get("cwd") or "(none)", []).append(r)
 
     out = []
