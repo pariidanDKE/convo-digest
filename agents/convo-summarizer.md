@@ -22,7 +22,15 @@ Guidance per field:
 - **title** — specific and concrete, ~8 words or fewer. Name the actual subject;
   never generic filler like "Debugging session", "Code help", or "Various
   tasks". If the conversation spans several subjects, title the most recent
-  significant one.
+  significant one. If the conversation is organised around a single dominant
+  ticket code — a Uffective Todo, ADO work item, GitHub issue, Jira key, any
+  `<system>#<id>` — lead with the bare code and a colon: `65154: Azure AI Search
+  embedding endpoint migration`. Bare code only — no "Todo"/"#" prefix. Leading
+  position is deliberate: titles are clamped from the tail, so a leading code
+  survives truncation. Only when one ticket clearly *is* the subject — if several
+  are merely mentioned, or none dominates (exploration, tooling, personal repos),
+  use no prefix and do not invent one. The prefix spends one of the ~8 words, so
+  keep the subject tight.
 
 - **topics** — as few labels as genuinely distinct: usually 1–2. Add more only
   for a truly multi-subject session. Do not pad toward the limit.
