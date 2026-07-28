@@ -103,7 +103,7 @@ def _count_pending() -> int | None:
         proc = subprocess.run(
             [sys.executable, os.path.join(SRC, "prepare.py"), "--count-only", "--index", INDEX],
             capture_output=True, text=True, timeout=120)
-        return int(json.loads(proc.stdout).get("changed", 0))
+        return int(json.loads(proc.stdout).get("finished_unindexed", 0))
     except Exception as e:
         _log(f"count error: {e}")
         return None

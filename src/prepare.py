@@ -179,12 +179,12 @@ def main() -> int:
                     help="skip backfill: stamp a stub record (last_ts only, no summary) for "
                          "every existing convo so the index starts forward-only. One-time.")
     ap.add_argument("--count-only", action="store_true",
-                    help="cheap pending count for the freshness hook: how many FINISHED "
-                         "(prior-day) convos changed vs the index. No strip/tokenize/write.")
+                    help="cheap pending count for the freshness hook and the digest skill's "
+                         "preflight: how many FINISHED (prior-day) convos differ from the "
+                         "index. Prints {\"finished_unindexed\": N}. No strip/tokenize/write.")
     args = ap.parse_args()
     cutoff = parse_since(args.since) if args.since else None
 
-    os.makedirs(args.work, exist_ok=True)
     index = load_state(args.index)  # change-detector source: record provenance.last_ts
     counter = TK.default_counter()
 
@@ -221,7 +221,7 @@ def main() -> int:
     # convo (the watermark only advances when it's actually summarized). No tokenizing.
     if args.count_only:
         today = datetime.now(timezone.utc).astimezone().date()
-        changed = 0
+        finished_unindexed = 0
         for f in glob.glob(os.path.join(args.projects, "**", "*.jsonl"), recursive=True):
             if os.path.basename(f).startswith("agent-"):
                 continue
@@ -241,9 +241,12 @@ def main() -> int:
                 continue
             if d >= today:
                 continue  # today's / live work — not "finished"
-            changed += 1
-        print(json.dumps({"changed": changed}))
+            finished_unindexed += 1
+        # Not "changed": full mode's `changed` uses different eligibility rules.
+        print(json.dumps({"finished_unindexed": finished_unindexed}))
         return 0
+
+    os.makedirs(args.work, exist_ok=True)  # full mode only — keeps --count-only write-free
 
     convos = []
     n_whole = 0

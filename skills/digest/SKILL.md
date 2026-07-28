@@ -16,22 +16,36 @@ workflow over conversations that are new or changed since the last run. The
 heavy lifting is the `digest.workflow.js` orchestration (prep → summarize →
 index); your job is to drive it to completion and report.
 
-## 1. See what's pending (cheap, no model calls)
-Run `prepare.py` to count what changed — this only strips/enumerates, it does
-not summarize:
+## 1. See what's pending (cheap, read-only)
+Run `prepare.py --count-only`. This is the **same code path the SessionStart
+freshness hook uses**, so the number you report here always matches the number
+the nudge showed the user:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/src/prepare.py \
-  --work ~/.claude/digest/work --index ~/.claude/digest/index.json \
-  | python3 -c "import json,sys;d=json.load(sys.stdin);c=d['counts'];\
-print(f\"changed={c['changed']} (whole={sum(1 for x in d['convos'] if x['tier']=='whole')}, \
-over-cap={sum(1 for x in d['convos'] if x['tier']=='sample')}, \
-trivial={c.get('trivial',0)} skipped under token floor)\")"
+python3 ${CLAUDE_PLUGIN_ROOT}/src/prepare.py --count-only \
+  --index ~/.claude/digest/index.json
 ```
 
-- `changed == 0` → index is current; tell the user, stop.
-- Otherwise report the count and note this will spend tokens + take a few
-  minutes (each whole-tier convo is one Haiku summarizer agent).
+It prints `{"finished_unindexed": N}` — finished (prior-day) conversations not
+yet in the index. It does not strip, tokenize, or write anything.
+
+- `N == 0` → no finished backlog; tell the user and stop. (Today's still-live
+  work is deliberately excluded — it gets picked up by a later run once the
+  session is done.)
+- Otherwise report `N` and note this will spend tokens + take a few minutes
+  (each whole-tier convo is one Haiku summarizer agent).
+
+**Do NOT run `prepare.py` in full mode as a preflight.** Full mode is not
+read-only: it writes work files and stamps summary-less stubs into
+`index.json` for conversations under the token floor. Using it as a "cheap
+count" mutates the state you are about to measure, so the workflow's own prep
+pass in step 2 then legitimately reports different numbers — which reads to
+the user as the digest contradicting itself.
+
+`N` is also only an **estimate** of how much work step 2 will do; the two use
+different eligibility rules (`--count-only` excludes anything touched today,
+the workflow excludes only what was touched in the last `--active-window-sec`).
+Treat the workflow's counts in step 2 as authoritative — see step 3.
 
 ## 1b. Resolve the title-writeback opt-in — BEFORE building
 The digest can write its generated title back to each conversation's Claude Code
@@ -125,13 +139,26 @@ pending count → 0. Still re-launch while `summarized > 0` to drain the windowe
 Offer this whenever the backlog is big rather than spawning hundreds of summarizers.
 
 ## 3. Report
-Sum the `indexed` counts across batches and tell the user how many conversations
-were added/updated, and the new index size. Mention any **over-cap (sampler-tier)
-convos that were skipped** — those need the (deferred) horizontal sampler and are
-not yet in the index.
+**Report only the workflow's own numbers.** Sum the `indexed` counts across
+batches and tell the user how many conversations were added/updated, plus the
+new index size. Mention any **over-cap (sampler-tier) convos that were
+skipped** — those need the (deferred) horizontal sampler and are not yet in the
+index.
+
+Do not reconcile the step-1 estimate against the workflow's counts, and do not
+present a preflight figure as if it were the work actually done. If the two
+differ, the workflow is right: it re-runs prep itself at the moment of
+execution, and its `counts` (`changed`, `trivial`, `active_skipped`, …) describe
+that same run. Quoting step 1's `N` as the number summarized is the single
+easiest way to hand the user contradictory figures.
+
+If the user asks why the numbers differ, the honest answer is that step 1 counts
+finished-and-unindexed conversations at one instant while the workflow counts
+what is eligible when it actually runs — and the authoritative per-run counts
+are in the workflow's `journal.jsonl`.
 
 ## Notes
-- Idempotent: re-running when nothing changed is a no-op (`changed == 0`).
+- Idempotent: re-running when nothing changed is a no-op (`finished_unindexed == 0`).
 - No API key — runs on the Claude Code subscription via the workflow's agents.
 - This is the manual counterpart to a nightly scheduled refresh; running it by
   hand and scheduling it are interchangeable.
