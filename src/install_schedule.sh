@@ -24,12 +24,30 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 TIME="03:13"
 ACTION="install"
 
-# Plugin root = parent of this script's dir (src/). The job cd's here so the
-# digest skill is discoverable: `claude -p` loads project-local `.claude/skills/`
-# relative to cwd, and launchd starts jobs in $HOME. Until the plugin is packaged
-# (issue #1) the skill is project-local only; after packaging the cd is harmless.
+# Plugin root = parent of this script's dir (src/). The job runs here (via the plist's
+# WorkingDirectory — not a `cd &&` chain, whose raw `&` is invalid XML and makes
+# `plutil -lint` reject the plist) so project-local settings load: `claude -p` reads
+# `.claude/settings.local.json` relative to cwd, which is where the headless
+# allowlist below lives. launchd would otherwise start the job in $HOME.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# TCC guard. launchd agents run without Full Disk Access, so anything under the
+# macOS privacy-protected user folders (Documents/Desktop/Downloads) is unreadable
+# to the job even though it works fine from Terminal. A job whose cwd sits there
+# dies instantly with a bare `error: An internal error occurred (EPERM)` and no
+# other diagnostic — silently, every night. Refuse to install rather than write a
+# job that cannot run; the plugin belongs outside those folders (e.g. ~/convo-digest).
+case "$PLUGIN_ROOT/" in
+  "$HOME"/Documents/*|"$HOME"/Desktop/*|"$HOME"/Downloads/*)
+    echo "Refusing to schedule: the plugin lives under a macOS privacy-protected" >&2
+    echo "folder ($PLUGIN_ROOT)." >&2
+    echo "launchd jobs have no Full Disk Access there, so the nightly run would die" >&2
+    echo "with 'An internal error occurred (EPERM)' every night." >&2
+    echo "Move the plugin outside Documents/Desktop/Downloads (e.g. ~/convo-digest)," >&2
+    echo "then re-run this installer from its new location." >&2
+    exit 1 ;;
+esac
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -77,6 +95,47 @@ fi
 
 mkdir -p "$HOME/.claude/digest" "$HOME/Library/LaunchAgents"
 
+# Headless permission allowlist. The unattended run is non-interactive: nothing can
+# approve a prompt, so every tool the digest needs must be pre-allowed or the run
+# stalls and reports "blocked by permissions" instead of draining. `acceptEdits`
+# alone does not cover Bash/Workflow/Skill — omitting Skill auto-rejects the
+# `Skill(digest)` call itself ("user-rejected"), so the job burns its whole session
+# retrying an invocation that can never succeed and never runs the digest at all.
+# Belt-and-braces: the plist also passes --allowedTools for the same tools, so a
+# missing/trimmed settings file cannot silently re-block the job.
+# These live in the plugin-root project settings
+# (gitignored, so a fresh clone has none) — regenerate them on every install so a
+# lost or hand-trimmed file can't silently re-block the job. Existing allows are
+# merged, never dropped.
+SETTINGS_DIR="$PLUGIN_ROOT/.claude"
+SETTINGS="$SETTINGS_DIR/settings.local.json"
+mkdir -p "$SETTINGS_DIR"
+python3 - "$SETTINGS" "$HOME" <<'PY'
+import json, os, sys
+path, home = sys.argv[1], sys.argv[2]
+# Claude Code's absolute-path rule form is `Read(//<path-without-leading-slash>/**)`.
+needed = ["Bash(python3 *)", f"Read(//{home.lstrip('/')}/.claude/**)", "Workflow", "Skill"]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        data = {}
+except Exception:
+    data = {}
+perms = data.setdefault("permissions", {})
+allow = perms.setdefault("allow", [])
+if not isinstance(allow, list):
+    allow = []
+added = [rule for rule in needed if rule not in allow]
+allow.extend(added)
+perms["allow"] = allow
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+print(f"  headless allowlist: {os.path.basename(path)} "
+       f"({'added ' + ', '.join(added) if added else 'already complete'})")
+PY
+
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -88,8 +147,10 @@ cat > "$PLIST" <<EOF
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>unset ANTHROPIC_API_KEY; cd '$PLUGIN_ROOT' && exec '$CLAUDE' -p "Refresh the conversation recall index now using the digest skill: drain all batches until nothing changed remains, then stop." --permission-mode acceptEdits --setting-sources user,project,local --add-dir "$HOME/.claude"</string>
+    <string>unset ANTHROPIC_API_KEY; exec '$CLAUDE' -p "Refresh the conversation recall index now using the digest skill: drain all batches until nothing changed remains, then stop." --permission-mode acceptEdits --allowedTools "Skill,Workflow,Bash,Read" --setting-sources user,project,local --add-dir "$HOME/.claude"</string>
   </array>
+  <key>WorkingDirectory</key>
+  <string>$PLUGIN_ROOT</string>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key><integer>$HH</integer>
