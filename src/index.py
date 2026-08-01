@@ -31,8 +31,9 @@ PROMPT_VERSION = "v1"
 SCHEMA_VERSION = "4.7"
 SUMMARY_FIELDS = ("title", "topics", "gist", "status", "unresolved", "key_entities")
 
-# Shared plugin config (tri-state `write_titles`: True | False | "not_now" | absent;
-# bool `nudge_disabled` for "stop the daily nudge for good").
+# Shared plugin config (tri-state `write_titles` and `nightly`: True | False | "not_now" |
+# absent; bool `nudge_disabled` for "stop the daily nudge for good"). `nightly` True means
+# the scheduled overnight run owns the drain, so the hook stops offering a manual digest.
 # No dedicated module: the hook reads it inline, we read it via _load_json below, and
 # --set-write-titles writes it via _dump_json — one small key doesn't warrant config.py.
 CONFIG_PATH = os.path.expanduser("~/.claude/digest/config.json")
@@ -466,6 +467,10 @@ def main() -> int:
                     help="force NOT writing titles back (overrides config)")
     ap.add_argument("--set-write-titles", choices=["yes", "no", "not_now"],
                     help="persist the title-writeback opt-in to config.json and exit")
+    ap.add_argument("--set-nightly", choices=["yes", "no", "not_now"],
+                    help="persist the overnight-digest decision to config.json and exit: "
+                         "'yes' means the scheduled run owns the drain (the hook stops "
+                         "offering a manual digest); 'no' stops the ask for good")
     ap.add_argument("--dismiss-nudge", choices=["today", "off"],
                     help="persist a freshness-nudge opt-out and exit: 'today' stamps a "
                          "one-day dismiss (asks again tomorrow if a backlog remains); "
@@ -481,6 +486,14 @@ def main() -> int:
         cfg["write_titles"] = val
         _dump_json(CONFIG_PATH, cfg)
         print(json.dumps({"write_titles": val}))
+        return 0
+
+    if args.set_nightly:
+        val = {"yes": True, "no": False, "not_now": "not_now"}[args.set_nightly]
+        cfg = _load_json(CONFIG_PATH)
+        cfg["nightly"] = val
+        _dump_json(CONFIG_PATH, cfg)
+        print(json.dumps({"nightly": val}))
         return 0
 
     if args.dismiss_nudge:
