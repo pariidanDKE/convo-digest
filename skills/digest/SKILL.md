@@ -48,9 +48,21 @@ the workflow excludes only what was touched in the last `--active-window-sec`).
 Treat the workflow's counts in step 2 as authoritative — see step 3.
 
 ## 1b. Resolve the title-writeback opt-in — BEFORE building
-The digest can write its generated title back to each conversation's Claude Code
-transcript so it shows as the title in the `claude --resume` picker. This is
-opt-in, persisted in `~/.claude/digest/config.json` as tri-state `write_titles`
+The digest can write its generated title back to each conversation, so it shows
+instead of Claude Code's own auto title. There are **two stores** and the writeback
+covers both:
+
+| Store | Shown in | Written by |
+|---|---|---|
+| transcript `custom-title` record | `claude --resume` picker | `index.py:_write_session_title` |
+| app session JSON `title` | desktop app sidebar | `appsessions.py:write_title` |
+
+The app re-stamps its own auto title into the transcript on every turn, so the
+transcript writer nearly always defers to it on app sessions — the app-store write is
+what actually changes the sidebar. It sets `titleSource: "user"` so the app's
+classifier stops re-titling the session.
+
+This is opt-in, persisted in `~/.claude/digest/config.json` as tri-state `write_titles`
 (`true` / `false` / `"not_now"` / absent).
 
 **Resolve this before running the workflow in step 2** — the writeback happens
@@ -62,16 +74,19 @@ opt in after and none of it does (you'd then need `--backfill-titles`, below).
 
 - If `config.json` has no `write_titles` key (or the SessionStart hook flags it
   unset), ask the user **once**, Yes/No: *"Want the digest to write its generated
-  titles back so they show in your `claude --resume` picker? It only fills in
-  sessions without a title and never overwrites ones you set yourself."*
+  titles back, so they show in the app sidebar and the `claude --resume` picker
+  instead of Claude Code's auto titles? It never overwrites a name you set yourself."*
 - Persist the answer (don't hand-write the JSON) **before** step 2:
   ```bash
   python3 ${CLAUDE_PLUGIN_ROOT}/src/index.py --set-write-titles <yes|no|not_now>
   ```
 - When `true`, step 2's `index.py` merge writes titles automatically — the workflow
-  needs no extra args. **Fill-or-ours** policy: only sessions with no `custom-title`,
-  or one the digest itself wrote before (tracked in `provenance.title_written`); never
-  a human or Claude-Code-auto title.
+  needs no extra args. **Fill-or-ours** policy, per store: the transcript is written
+  only when it has no `custom-title` or carries one we wrote before
+  (`provenance.title_written`); the app store is written unless `titleSource` is
+  `"user"` with a title we didn't write (`provenance.app_title_written`). A
+  Claude-Code-auto title is ours to replace in the app store — that is the point —
+  but a name you chose yourself is never touched in either.
 
 ### Retro-titling already-indexed convos (`--backfill-titles`)
 A normal digest only titles *changed* convos. For history indexed before the title
@@ -81,8 +96,11 @@ fill-or-ours policy, idempotent):
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/src/index.py --backfill-titles --index ~/.claude/digest/index.json
 ```
-Returns `{titled, current, skipped}`. Offer this when a user opts in and already has
-an index — otherwise their existing conversations would never get titles.
+Returns `{titled, current, skipped}` for the transcript store plus `{app_titled,
+app_current, app_skipped}` for the app store. The two differ a lot: `skipped` is high
+because the app owns the transcript's `custom-title`, and `app_skipped` counts every
+CLI-only convo that has no app session at all. Offer this when a user opts in and
+already has an index — otherwise their existing conversations would never get titles.
 
 ## 2. Drain in batches
 
