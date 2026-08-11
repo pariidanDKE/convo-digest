@@ -44,6 +44,20 @@ SRC = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(SRC)
 IS_WINDOWS = os.name == "nt"
 
+# A Claude Desktop scheduled task is the app-managed alternative to the OS job: it fires
+# only while the app is open, but runs in-app (live auth, current plugin) with a run
+# history in the sidebar. This installer CANNOT create or delete one — the schedule is
+# registered inside the app, reachable only through the `create_scheduled_task` /
+# `delete_scheduled_task` MCP tools (the setup-nightly skill drives those). All we can do
+# here is DETECT it, so --status and the health hook see it as a live mechanism.
+DESKTOP_TASK_ID = "convo-digest-nightly"
+DESKTOP_TASK_SKILL = os.path.join(HOME, ".claude", "scheduled-tasks", DESKTOP_TASK_ID,
+                                  "SKILL.md")
+
+
+def desktop_task_installed() -> bool:
+    return os.path.isfile(DESKTOP_TASK_SKILL)
+
 # `claude -p` takes a natural-language prompt — it does NOT support `/digest` slash-command
 # syntax, so the scheduled run asks for the skill by name instead.
 PROMPT = ("Refresh the conversation recall index now using the digest skill: "
@@ -365,6 +379,14 @@ def status() -> dict:
     detail = {"macos": macos_status, "linux": linux_status,
               "windows": windows_status}.get(plat)
     base.update(detail() if detail else {"installed": False, "mechanism": None, "unit": None})
+    # A Desktop task counts as installed for the health check even when no OS job exists —
+    # the two mechanisms are alternatives, and either one keeps the index fresh.
+    desktop = desktop_task_installed()
+    base["desktop_task"] = desktop
+    if desktop and not base.get("installed"):
+        base["installed"] = True
+        base["mechanism"] = "desktop-task"
+        base["unit"] = DESKTOP_TASK_SKILL
     return base
 
 
@@ -388,8 +410,14 @@ def main() -> int:
     if args.uninstall:
         {"macos": macos_uninstall, "linux": linux_uninstall,
          "windows": windows_uninstall}[plat]()
-        print("Removed the nightly digest job. Freshness falls back to the "
+        print("Removed the nightly digest OS job. Freshness falls back to the "
               "SessionStart catch-up baseline.")
+        if desktop_task_installed():
+            # The app owns the Desktop task's registry, so this installer can't unregister
+            # it — deletion goes through the app's Routines page or the delete MCP tool.
+            print("Note: a Claude Desktop task '{}' is also present. Remove it from the "
+                  "app's Routines page, or ask Claude to delete it — it can't be "
+                  "unregistered from here.".format(DESKTOP_TASK_ID))
         return 0
 
     if args.start:
