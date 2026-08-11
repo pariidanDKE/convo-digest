@@ -222,12 +222,15 @@ def _nightly_installed() -> bool:
 
 
 def _build_nudge(n: int, m: int, titles_unset: bool = False,
-                 nightly: object = None, nightly_missing: bool = False) -> str | None:
+                 nightly: object = None, nightly_missing: bool = False,
+                 mechanism: object = None) -> str | None:
     """Compose the single SessionStart nudge from four independent signals:
       n = finished conversations pending a digest (the fixed last_ts change-detector)
       m = repos with indexed history but no work/personal profile
       titles_unset = the write_titles opt-in is still undecided (absent / "not_now")
       nightly = the overnight-digest decision (True | False | "not_now" | None)
+      mechanism = which scheduler owns it ("os" | "desktop" | None), so the remediation
+                  text matches — an OS job is re-installed, a Desktop task is recreated
     All ride in ONE message — digest leads (primary), the rest ride along (secondary) — so
     they never compete for the day's nudge and none is starved on busy days. Returns None
     when there's nothing worth saying.
@@ -237,28 +240,36 @@ def _build_nudge(n: int, m: int, titles_unset: bool = False,
     BIG_BATCH anyway means the schedule is silently failing — the one case where delegated
     users DO need to hear from us, so it flips to a health warning instead of an offer."""
     nightly_on = nightly is True
-    nightly_broken = nightly_on and (nightly_missing or n > BIG_BATCH)
+    is_desktop = mechanism == "desktop"
+    # A Desktop task only fires while the app is open, so a big backlog often just means the
+    # app was closed for a while — not a broken job. Don't cry failure on the count alone
+    # for that mechanism; a genuinely missing task (nightly_missing) still warrants it.
+    nightly_broken = nightly_on and (nightly_missing or (n > BIG_BATCH and not is_desktop))
     nightly_unset = nightly in (None, "not_now")
     if n <= 0 and m <= 0 and not titles_unset and not nightly_unset and not nightly_broken:
         return None
     if nightly_on and not nightly_broken and m <= 0 and not titles_unset:
         return None                      # delegated + healthy + nothing else to say
+    redo = ("recreate it by running the `/convo-digest:setup-nightly` skill" if is_desktop
+            else "re-install it with `python3 <plugin>/src/install_schedule.py`")
     parts = []
     if nightly_missing and nightly_on:
+        gone_where = ("no Claude Desktop scheduled task is registered any more (it was "
+                      "deleted, or the app data was reset)" if is_desktop else
+                      "no scheduled job is registered with the OS any more (it was removed, "
+                      "or the machine/profile changed)")
         parts.append(
             "NIGHTLY IS GONE (lead with this): the user opted into an overnight digest, but "
-            "no scheduled job is registered with the OS any more (it was removed, or the "
-            "machine/profile changed). Tell them plainly that the automation is not running, "
-            "and offer to re-install it with `python3 <plugin>/src/install_schedule.py`.")
+            f"{gone_where}. Tell them plainly that the automation is not running, and offer "
+            f"to {redo}.")
     elif nightly_broken:
         parts.append(
             f"NIGHTLY MAY BE BROKEN (lead with this): the overnight digest is set up, but "
             f"{n} conversation(s) are still unindexed — more than a healthy night should "
             f"leave. Tell the user the scheduled run looks like it is failing, check "
             f"`~/.claude/digest/nightly.log` for the last run's output, and offer both a "
-            f"manual `digest` now and a re-install via "
-            f"`python3 <plugin>/src/install_schedule.py` (its `--status` reports whether "
-            f"the OS job is still registered).")
+            f"manual `digest` now and to {redo} (`install_schedule.py --status` reports "
+            f"whether the job is still registered).")
     elif n > 0 and not nightly_on:
         big = " (a large backlog — offer to drain it over several mornings, not all " \
             "at once)" if n > BIG_BATCH else ""
@@ -271,10 +282,11 @@ def _build_nudge(n: int, m: int, titles_unset: bool = False,
             "OVERNIGHT (offer this alongside the digest, not instead of it): the digest can "
             "run itself unattended overnight so the index is always fresh and this nudge "
             "goes away. Ask whether they want that; if yes, run the "
-            "`/convo-digest:setup-nightly` skill, which installs the schedule on macOS, "
-            "Linux or Windows and settles the remaining preferences in the same pass. If "
-            "they say no, persist it with `python3 <plugin>/src/index.py --set-nightly no` "
-            "so it is never asked again ('not_now' to re-ask later).")
+            "`/convo-digest:setup-nightly` skill, which sets up the overnight run (an OS "
+            "scheduler that fires with the app closed, or a Claude Desktop task) and "
+            "settles the remaining preferences in the same pass. If they say no, persist it "
+            "with `python3 <plugin>/src/index.py --set-nightly no` so it is never asked "
+            "again ('not_now' to re-ask later).")
     if m > 0:
         parts.append(
             f"PROFILE (secondary): {m} repo(s) have indexed history but aren't tagged "
@@ -388,8 +400,9 @@ def main() -> None:
     # "chose yes" and "job registered" is the only case worth spending it on.
     nightly = cfg.get("nightly")
     nightly_missing = nightly is True and not _nightly_installed()
+    mechanism = cfg.get("nightly_mechanism")
 
-    msg = _build_nudge(n, m, titles_unset, nightly, nightly_missing)
+    msg = _build_nudge(n, m, titles_unset, nightly, nightly_missing, mechanism)
     if msg is None:
         _log("silent (nothing pending, all profiled, titles + nightly decided)", n)
         _emit()

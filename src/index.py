@@ -502,6 +502,12 @@ def main() -> int:
                     help="persist the overnight-digest decision to config.json and exit: "
                          "'yes' means the scheduled run owns the drain (the hook stops "
                          "offering a manual digest); 'no' stops the ask for good")
+    ap.add_argument("--set-nightly-mechanism", choices=["os", "desktop"],
+                    help="persist which scheduler runs the overnight digest and exit: 'os' "
+                         "is the launchd/systemd/cron/Task-Scheduler job (fires with the app "
+                         "closed); 'desktop' is a Claude Desktop scheduled task (fires only "
+                         "while the app is open). The hook reads this to give the right "
+                         "remediation when the automation goes missing")
     ap.add_argument("--dismiss-nudge", choices=["today", "off"],
                     help="persist a freshness-nudge opt-out and exit: 'today' stamps a "
                          "one-day dismiss (asks again tomorrow if a backlog remains); "
@@ -510,6 +516,13 @@ def main() -> int:
                     help="write titles for ALL already-indexed convos (retro-title "
                          "history the normal changed-only digest would skip); needs --index")
     args = ap.parse_args()
+
+    if args.set_nightly_mechanism:
+        cfg = _load_json(CONFIG_PATH)
+        cfg["nightly_mechanism"] = args.set_nightly_mechanism
+        _dump_json(CONFIG_PATH, cfg)
+        print(json.dumps({"nightly_mechanism": args.set_nightly_mechanism}))
+        return 0
 
     if args.set_write_titles:
         val = {"yes": True, "no": False, "not_now": "not_now"}[args.set_write_titles]
