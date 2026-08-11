@@ -26,13 +26,15 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(__file__))
 import tokens as TK  # noqa: E402
 import repos as R  # noqa: E402
+import appsessions as APP  # noqa: E402
 
 PROMPT_VERSION = "v1"
 SCHEMA_VERSION = "4.7"
 SUMMARY_FIELDS = ("title", "topics", "gist", "status", "unresolved", "key_entities")
 
-# Shared plugin config (tri-state `write_titles`: True | False | "not_now" | absent;
-# bool `nudge_disabled` for "stop the daily nudge for good").
+# Shared plugin config (tri-state `write_titles` and `nightly`: True | False | "not_now" |
+# absent; bool `nudge_disabled` for "stop the daily nudge for good"). `nightly` True means
+# the scheduled overnight run owns the drain, so the hook stops offering a manual digest.
 # No dedicated module: the hook reads it inline, we read it via _load_json below, and
 # --set-write-titles writes it via _dump_json — one small key doesn't warrant config.py.
 CONFIG_PATH = os.path.expanduser("~/.claude/digest/config.json")
@@ -307,10 +309,12 @@ def _merge_items(items: list, index: dict, index_path: str,
     re-digest would silently un-archive a convo.
 
     When `write_titles`, also write the digest title back to the conversation's own CC
-    transcript as a `custom-title` (fill-or-ours; see _write_session_title). We track
-    what we wrote in provenance.title_written so a later re-digest recognises its own
+    transcript as a `custom-title` (fill-or-ours; see _write_session_title) and to the
+    desktop app's session store (see appsessions). We track what we wrote in
+    provenance.title_written / app_title_written so a later re-digest recognises its own
     title as safe to refresh (vs a foreign one to leave alone). Returns (written, failed)."""
     written, failed = 0, []
+    session_map = APP.load_map() if write_titles else {}
     for it in items:
         try:
             with open(it["work_path"], encoding="utf-8") as fh:
@@ -322,11 +326,14 @@ def _merge_items(items: list, index: dict, index_path: str,
             if old and old.get("curation"):       # carry archive state forward
                 rec["curation"] = old["curation"]
             if write_titles:
+                title = rec["summary"].get("title")
                 prev = (old or {}).get("provenance", {}).get("title_written")
-                wrote = _write_session_title(
-                    rec.get("source"), rec.get("id"), rec["summary"].get("title"), prev)
+                wrote = _write_session_title(rec.get("source"), rec.get("id"), title, prev)
                 if wrote:
                     rec["provenance"]["title_written"] = wrote
+                app_prev = (old or {}).get("provenance", {}).get("app_title_written")
+                if APP.write_title(rec.get("id"), title, app_prev, session_map):
+                    rec["provenance"]["app_title_written"] = title
             index[it["key"]] = rec
             _dump_json(index_path, index)         # persist per-record (crash-safe)
             written += 1
@@ -416,32 +423,57 @@ def backfill_titles(index_path: str) -> dict:
     that re-enter _merge_items), so history indexed before the title feature — or before
     a late opt-in — would otherwise never get a title. This one-shot pass covers them.
 
+    Covers both title stores — the transcript `custom-title` (the --resume picker) and
+    the desktop app's session JSON (the sidebar). The two are counted separately because
+    a convo commonly qualifies for one and not the other: the app re-stamps its own auto
+    title into every transcript, which the transcript writer must leave alone, while that
+    same auto title IS ours to replace in the app store.
+
     Same fill-or-ours policy and provenance tracking as the inline writer, so it's
-    idempotent and never clobbers a foreign (human / CC-auto) title. Explicit command:
-    it does NOT gate on the write_titles opt-in (running it is the consent) and does not
-    modify config. Returns counts: titled (newly written), current (already ours),
-    skipped (foreign title, or missing transcript/title)."""
+    idempotent and never clobbers a foreign (human) title. Explicit command: it does NOT
+    gate on the write_titles opt-in (running it is the consent) and does not modify
+    config. Returns counts: titled (newly written), current (already ours), skipped
+    (foreign title, or missing transcript/title), and the app_* equivalents."""
     index = _load_json(index_path)
+    session_map = APP.load_map()
     titled, current, skipped = 0, 0, 0
+    app_titled, app_current, app_skipped = 0, 0, 0
     for rec in index.values():
         src, sid = rec.get("source"), rec.get("id")
         title = (rec.get("summary") or {}).get("title")
-        if not (src and title and sid and os.path.exists(src)):
+        if not (title and sid):
             skipped += 1
+            app_skipped += 1
             continue
-        prev = rec.get("provenance", {}).get("title_written")
-        before = _read_last_custom_title(src)
-        wrote = _write_session_title(src, sid, title, prev)
-        if wrote is None:               # foreign title present — left untouched
+
+        if not (src and os.path.exists(src)):
             skipped += 1
-        elif before == title:           # already current — no append happened
-            current += 1
-        else:                           # newly written (or refreshed our own)
-            rec.setdefault("provenance", {})["title_written"] = wrote
-            titled += 1
+        else:
+            prev = rec.get("provenance", {}).get("title_written")
+            before = _read_last_custom_title(src)
+            wrote = _write_session_title(src, sid, title, prev)
+            if wrote is None:               # foreign title present — left untouched
+                skipped += 1
+            elif before == title:           # already current — no append happened
+                current += 1
+            else:                           # newly written (or refreshed our own)
+                rec.setdefault("provenance", {})["title_written"] = wrote
+                titled += 1
+
+        app_prev = rec.get("provenance", {}).get("app_title_written")
+        app_wrote = APP.write_title(sid, title, app_prev, session_map)
+        if app_wrote is None:               # no app session, or a name the user chose
+            app_skipped += 1
+        else:
+            rec.setdefault("provenance", {})["app_title_written"] = title
+            if app_wrote == "current":
+                app_current += 1
+            else:
+                app_titled += 1
     _dump_json(index_path, index)
     return {"titled": titled, "current": current, "skipped": skipped,
-            "index_size": len(index)}
+            "app_titled": app_titled, "app_current": app_current,
+            "app_skipped": app_skipped, "index_size": len(index)}
 
 
 def main() -> int:
@@ -466,6 +498,10 @@ def main() -> int:
                     help="force NOT writing titles back (overrides config)")
     ap.add_argument("--set-write-titles", choices=["yes", "no", "not_now"],
                     help="persist the title-writeback opt-in to config.json and exit")
+    ap.add_argument("--set-nightly", choices=["yes", "no", "not_now"],
+                    help="persist the overnight-digest decision to config.json and exit: "
+                         "'yes' means the scheduled run owns the drain (the hook stops "
+                         "offering a manual digest); 'no' stops the ask for good")
     ap.add_argument("--dismiss-nudge", choices=["today", "off"],
                     help="persist a freshness-nudge opt-out and exit: 'today' stamps a "
                          "one-day dismiss (asks again tomorrow if a backlog remains); "
@@ -481,6 +517,14 @@ def main() -> int:
         cfg["write_titles"] = val
         _dump_json(CONFIG_PATH, cfg)
         print(json.dumps({"write_titles": val}))
+        return 0
+
+    if args.set_nightly:
+        val = {"yes": True, "no": False, "not_now": "not_now"}[args.set_nightly]
+        cfg = _load_json(CONFIG_PATH)
+        cfg["nightly"] = val
+        _dump_json(CONFIG_PATH, cfg)
+        print(json.dumps({"nightly": val}))
         return 0
 
     if args.dismiss_nudge:

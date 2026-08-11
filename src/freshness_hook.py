@@ -32,7 +32,8 @@ from datetime import datetime
 DIGEST = os.path.expanduser("~/.claude/digest")
 INDEX = os.path.join(DIGEST, "index.json")
 LOG = os.path.join(DIGEST, "freshness_hook.log")    # ground-truth trace of every fire
-CONFIG = os.path.join(DIGEST, "config.json")        # write_titles opt-in + nudge_disabled
+CONFIG = os.path.join(DIGEST, "config.json")        # write_titles/nightly opt-ins + nudge_disabled
+REPOS = os.path.join(DIGEST, "repos.json")          # work/personal profiles (drives the m count)
 # --- self-healing nudge state (#5) ------------------------------------------
 SESSION_STAMP = os.path.join(DIGEST, "last_nudged_session")   # per-session guard (session_id)
 DISMISS_STAMP = os.path.join(DIGEST, "nudge_dismissed_date")  # "not today" (a local date)
@@ -90,10 +91,17 @@ def _write_text(path: str, val: str) -> None:
 
 
 def _index_mtime() -> float:
-    try:
-        return os.path.getmtime(INDEX)
-    except OSError:
-        return 0.0
+    """Cache key for (n, m). Both counts derive from the index, but m ALSO derives from
+    repos.json — so profiling a repo has to invalidate the cache too, or the PROFILE nudge
+    keeps firing for the rest of the day after the user already fixed it (profiling never
+    touches index.json). Summing both mtimes keys on "either input changed"."""
+    total = 0.0
+    for path in (INDEX, REPOS):
+        try:
+            total += os.path.getmtime(path)
+        except OSError:
+            pass
+    return total
 
 
 def _count_pending() -> int | None:
@@ -103,7 +111,7 @@ def _count_pending() -> int | None:
         proc = subprocess.run(
             [sys.executable, os.path.join(SRC, "prepare.py"), "--count-only", "--index", INDEX],
             capture_output=True, text=True, timeout=120)
-        return int(json.loads(proc.stdout).get("changed", 0))
+        return int(json.loads(proc.stdout).get("finished_unindexed", 0))
     except Exception as e:
         _log(f"count error: {e}")
         return None
@@ -198,24 +206,75 @@ def ensure_workflow_installed() -> None:
         _log(f"workflow-install error: {e}")
 
 
-def _build_nudge(n: int, m: int, titles_unset: bool = False) -> str | None:
-    """Compose the single SessionStart nudge from three independent signals:
+def _nightly_installed() -> bool:
+    """Whether a scheduled overnight digest is actually registered with the OS. Config says
+    what the user *chose*; this says what is *true* — they diverge when a job is removed
+    behind our back (OS reinstall, profile migration), which is exactly when the user needs
+    telling rather than silently losing their automation."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SRC, "install_schedule.py"), "--status"],
+            capture_output=True, text=True, timeout=30)
+        return bool(json.loads(proc.stdout).get("installed"))
+    except Exception as e:
+        _log(f"nightly-status error: {e}")
+        return False
+
+
+def _build_nudge(n: int, m: int, titles_unset: bool = False,
+                 nightly: object = None, nightly_missing: bool = False) -> str | None:
+    """Compose the single SessionStart nudge from four independent signals:
       n = finished conversations pending a digest (the fixed last_ts change-detector)
       m = repos with indexed history but no work/personal profile
       titles_unset = the write_titles opt-in is still undecided (absent / "not_now")
-    All ride in ONE message — digest leads (primary), profiling + the titles ask ride
-    along (secondary) — so they never compete for the day's nudge and neither is
-    starved on busy days. Returns None when there's nothing worth saying."""
-    if n <= 0 and m <= 0 and not titles_unset:
+      nightly = the overnight-digest decision (True | False | "not_now" | None)
+    All ride in ONE message — digest leads (primary), the rest ride along (secondary) — so
+    they never compete for the day's nudge and none is starved on busy days. Returns None
+    when there's nothing worth saying.
+
+    `nightly is True` means the user delegated the drain to a scheduled run, so a normal
+    pending count is not their problem and we stay quiet about it. A backlog that grows past
+    BIG_BATCH anyway means the schedule is silently failing — the one case where delegated
+    users DO need to hear from us, so it flips to a health warning instead of an offer."""
+    nightly_on = nightly is True
+    nightly_broken = nightly_on and (nightly_missing or n > BIG_BATCH)
+    nightly_unset = nightly in (None, "not_now")
+    if n <= 0 and m <= 0 and not titles_unset and not nightly_unset and not nightly_broken:
         return None
+    if nightly_on and not nightly_broken and m <= 0 and not titles_unset:
+        return None                      # delegated + healthy + nothing else to say
     parts = []
-    if n > 0:
+    if nightly_missing and nightly_on:
+        parts.append(
+            "NIGHTLY IS GONE (lead with this): the user opted into an overnight digest, but "
+            "no scheduled job is registered with the OS any more (it was removed, or the "
+            "machine/profile changed). Tell them plainly that the automation is not running, "
+            "and offer to re-install it with `python3 <plugin>/src/install_schedule.py`.")
+    elif nightly_broken:
+        parts.append(
+            f"NIGHTLY MAY BE BROKEN (lead with this): the overnight digest is set up, but "
+            f"{n} conversation(s) are still unindexed — more than a healthy night should "
+            f"leave. Tell the user the scheduled run looks like it is failing, check "
+            f"`~/.claude/digest/nightly.log` for the last run's output, and offer both a "
+            f"manual `digest` now and a re-install via "
+            f"`python3 <plugin>/src/install_schedule.py` (its `--status` reports whether "
+            f"the OS job is still registered).")
+    elif n > 0 and not nightly_on:
         big = " (a large backlog — offer to drain it over several mornings, not all " \
             "at once)" if n > BIG_BATCH else ""
         parts.append(
             f"DIGEST (the important one): {n} finished conversation(s) from earlier "
             f"aren't in the recall index yet{big}. Offer to run the `digest` skill to "
             f"summarize them, then `digest-archive` to triage what landed.")
+    if nightly_unset:
+        parts.append(
+            "OVERNIGHT (offer this alongside the digest, not instead of it): the digest can "
+            "run itself unattended overnight so the index is always fresh and this nudge "
+            "goes away. Ask whether they want that; if yes, run the "
+            "`/convo-digest:setup-nightly` skill, which installs the schedule on macOS, "
+            "Linux or Windows and settles the remaining preferences in the same pass. If "
+            "they say no, persist it with `python3 <plugin>/src/index.py --set-nightly no` "
+            "so it is never asked again ('not_now' to re-ask later).")
     if m > 0:
         parts.append(
             f"PROFILE (secondary): {m} repo(s) have indexed history but aren't tagged "
@@ -297,16 +356,22 @@ def main() -> None:
             "remarks, you MUST offer the user (a friendly one-liner) to run "
             "`/convo-digest:digest` to build it. If they have a lot of history, offer a "
             "choice: build everything, or just recent (e.g. the last week — the digest "
-            "skill supports a windowed backfill that ignores the rest). As PART OF that "
-            "build, also ask (Yes/No) whether the digest may write its generated titles "
-            "back to each conversation's Claude Code transcript so they show in the `claude "
-            "--resume` picker — and persist the answer BEFORE the build runs, so a backfill "
-            "titles the whole history in one pass rather than missing it (the digest skill "
-            "covers this). If they decline, run `python3 <plugin>/src/index.py "
-            "--dismiss-nudge today` (or `off` to stop for good) so it doesn't re-ask; if "
-            "they ignore it, leave it to re-surface next conversation. (A separate one-time "
-            "`/convo-digest:profile-repos` can also tag repos work/personal for sharper "
-            "recall — mention only if it comes up naturally, don't pitch everything at once.)")
+            "skill supports a windowed backfill that ignores the rest). Settle the two "
+            "standing preferences in this SAME first exchange rather than dribbling them "
+            "out over later sessions — ask both as part of the build offer, and persist "
+            "each answer BEFORE the build runs: (a) TITLES — may the digest write its "
+            "generated titles back to each conversation's Claude Code transcript, so they "
+            "show in the `claude --resume` picker? (Yes/No; a backfill then titles the "
+            "whole history in one pass instead of missing it) — persist with `python3 "
+            "<plugin>/src/index.py --set-write-titles <yes|no>`. (b) OVERNIGHT — should "
+            "the digest keep itself fresh by running unattended overnight, so they never "
+            "have to think about it again? If yes, run the `/convo-digest:setup-nightly` "
+            "skill (macOS, Linux and Windows are all supported); if no, persist `python3 "
+            "<plugin>/src/index.py --set-nightly no`. If they decline the whole thing, run "
+            "`python3 <plugin>/src/index.py --dismiss-nudge today` (or `off` to stop for "
+            "good); if they ignore it, leave it to re-surface next conversation. (A "
+            "separate one-time `/convo-digest:profile-repos` can also tag repos "
+            "work/personal for sharper recall — mention only if it comes up naturally.)")
 
     # Pending count (n) + unprofiled-repo count (m), cached so this per-session retry
     # doesn't rescan every conversation. n == 0 is the backlog nudge's automatic "done".
@@ -318,11 +383,18 @@ def main() -> None:
     # earlier), so we never ask before the first digest has run.
     titles_unset = cfg.get("write_titles") in (None, "not_now")
 
-    msg = _build_nudge(n, m, titles_unset)
+    # Overnight-digest decision. Only verify the OS job when the user believes they have
+    # one — that keeps the extra subprocess off the common path, and a divergence between
+    # "chose yes" and "job registered" is the only case worth spending it on.
+    nightly = cfg.get("nightly")
+    nightly_missing = nightly is True and not _nightly_installed()
+
+    msg = _build_nudge(n, m, titles_unset, nightly, nightly_missing)
     if msg is None:
-        _log("silent (nothing pending, all profiled, titles decided)", n)
+        _log("silent (nothing pending, all profiled, titles + nightly decided)", n)
         _emit()
-    _log(f"nudged (n={n}, m={m}, titles_unset={titles_unset})", n)
+    _log(f"nudged (n={n}, m={m}, titles_unset={titles_unset}, nightly={nightly}"
+         f"{', MISSING' if nightly_missing else ''})", n)
     _emit(msg)
 
 

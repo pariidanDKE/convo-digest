@@ -3,3 +3,4 @@ __pycache__/
 *.jsonl
 .DS_Store
 .playwright-mcp/
+.claude/settings.local.json

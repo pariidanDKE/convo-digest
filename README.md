@@ -9,19 +9,56 @@ leaves your machine.
 
 ## What you get
 
-Three skills (namespaced under `convo-digest`):
+Skills (namespaced under `convo-digest`):
 
 | Skill | What it does |
 | :---- | :----------- |
 | `/convo-digest:digest` | Summarize conversations that changed since the last run into the recall index. |
 | `/convo-digest:recall` | Find a relevant past conversation for what you're starting on, and offer to resume it. |
 | `/convo-digest:digest-archive` | Review recent conversations and archive the ones you're done with so they stop cluttering recall. |
+| `/convo-digest:setup-nightly` | Schedule the digest to run itself overnight (macOS, Linux, Windows). |
+| `/convo-digest:profile-repos` | Tag repos work/personal so recall can label and rank results. |
 
 Plus a **SessionStart nudge**: when finished conversations aren't indexed yet, it
 offers to refresh (once per conversation). Because a SessionStart hook can only reach
 you *through the model relaying it*, the offer is self-healing — it keeps re-surfacing
 each new conversation until the backlog is actually cleared or you opt out ("not today"
 or off for good), so a silently-dropped offer isn't lost for the day.
+
+## Set it and forget it
+
+If you'd rather never be asked, let the digest run itself overnight:
+
+```
+/convo-digest:setup-nightly
+```
+
+It schedules a headless nightly run — **launchd** on macOS, a **systemd user timer**
+(or cron) on Linux, **Task Scheduler** on Windows — all firing the same generated
+launcher at `~/.claude/digest/run-nightly.*`, which you can also run by hand to debug
+a bad night. The run is on-plan (Agent SDK credit pool, no API key, no impact on your
+interactive session usage).
+
+Once it's set up the daily nudge goes quiet, because the schedule owns the drain. Two
+things still get through, so automation can't fail silently: if the backlog grows past
+25 anyway, or the scheduled job disappears from the OS, the hook tells you the
+automation is broken instead of saying nothing.
+
+Manage it directly with:
+
+```bash
+python3 <plugin>/src/install_schedule.py --status      # installed? which mechanism?
+python3 <plugin>/src/install_schedule.py --start       # run it right now
+python3 <plugin>/src/install_schedule.py --time 02:00  # re-schedule
+python3 <plugin>/src/install_schedule.py --uninstall   # remove it
+```
+
+> **macOS note:** launchd agents have no Full Disk Access, so the installer refuses to
+> schedule a plugin living under `Documents`, `Desktop` or `Downloads` — the job would
+> die with a bare `EPERM` every night. Keep the plugin somewhere like `~/convo-digest`.
+>
+> **Linux note:** without `sudo loginctl enable-linger $USER`, a user timer only runs
+> while you're logged in.
 
 ## Requirements
 
