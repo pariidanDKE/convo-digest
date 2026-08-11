@@ -56,9 +56,15 @@ project settings — the unattended run cannot approve prompts, so a missing all
 silently blocks the whole drain.
 
 ### 2b. Claude Desktop task
-The installer script **cannot** create this — the schedule is registered inside the
-app, reachable only through the `create_scheduled_task` MCP tool. Call that tool
-yourself (no clicking through the Routines UI):
+**Availability check first:** this mechanism needs the `create_scheduled_task` tool,
+which only exists in the Claude Desktop app. If it isn't in your toolset (CLI-only,
+headless, an IDE session), the Desktop task cannot be created here — say so and use the
+OS scheduler (2a) instead. Do not try to hand-write the task files; the schedule lives
+in the app's own registry, not on disk.
+
+The installer script **cannot** create this either — the schedule is registered inside
+the app, reachable only through `create_scheduled_task`. Call that tool yourself (no
+clicking through the Routines UI):
 
 - `taskId`: `convo-digest-nightly`
 - `cronExpression`: the chosen time as `MM HH * * *` (e.g. `13 3 * * *` for 03:13)

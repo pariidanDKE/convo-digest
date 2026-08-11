@@ -33,11 +33,18 @@ If you'd rather never be asked, let the digest run itself overnight:
 /convo-digest:setup-nightly
 ```
 
-It schedules a headless nightly run — **launchd** on macOS, a **systemd user timer**
-(or cron) on Linux, **Task Scheduler** on Windows — all firing the same generated
-launcher at `~/.claude/digest/run-nightly.*`, which you can also run by hand to debug
-a bad night. The run is on-plan (Agent SDK credit pool, no API key, no impact on your
-interactive session usage).
+You pick one of two mechanisms:
+
+- **OS scheduler** (default) — **launchd** on macOS, a **systemd user timer** (or cron)
+  on Linux, **Task Scheduler** on Windows — all firing the same generated launcher at
+  `~/.claude/digest/run-nightly.*`, which you can also run by hand to debug a bad night.
+  Fires even when the app is closed (macOS/systemd catch up on wake), and is the only
+  option on CLI-only / headless / server installs. On-plan: no API key, no impact on
+  your interactive session usage.
+- **Claude Desktop task** — runs inside the desktop app, so it uses your live login
+  (no stale-token failures), always the current plugin version, and leaves a run
+  history in the app sidebar. Only fires while the app is open, and draws your
+  interactive subscription usage like any session. Desktop app only.
 
 Once it's set up the daily nudge goes quiet, because the schedule owns the drain. Two
 things still get through, so automation can't fail silently: if the backlog grows past
