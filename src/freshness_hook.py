@@ -233,16 +233,20 @@ def _scheduled_session(session_id: str) -> bool:
     own signals come first (it marks unattended sessions and names the app session in
     the environment); the session-file scan is the fallback, reading only files touched
     in the last few minutes."""
-    if os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "0":
-        return True
+    attended = os.environ.get("CLAUDE_CODE_SESSION_ATTENDED")
+    host = os.environ.get("CLAUDE_CODE_HOST_SESSION_ID", "")
     try:
         sys.path.insert(0, SRC)
         import appsessions
-        return bool(appsessions.current_scheduled_task()
-                    or appsessions.scheduled_task_for(session_id, modified_within=600))
+        task = (appsessions.current_scheduled_task()
+                or appsessions.scheduled_task_for(session_id, modified_within=600))
     except Exception as e:
         _log(f"scheduled-check error: {e}")
-        return False
+        task = None
+    scheduled = attended == "0" or bool(task)
+    _log(f"scheduled-check session={session_id or '-'} host={host or '-'} "
+         f"attended={attended} task={task} src={SRC} -> {scheduled}")
+    return scheduled
 
 
 def _run_health() -> dict | None:
