@@ -98,9 +98,9 @@ def scheduled_cli_ids(sessions: dict[str, list[tuple[str, dict]]] | None = None)
 def current_scheduled_task() -> str | None:
     """The scheduled task behind the session THIS process runs in, or None. The desktop
     app tells its CLI which app session it belongs to (CLAUDE_CODE_HOST_SESSION_ID, the
-    `local_…` id that names the session file), and that file carries scheduledTaskId
-    from the moment the run is created. That works at SessionStart, when the file does
-    not yet record the CLI session id that scheduled_task_for() matches on."""
+    `local_…` id that names the session file), and that file carries scheduledTaskId.
+    The app writes the file a little after the session starts, so this finds nothing
+    during SessionStart (the hook checks CLAUDE_CODE_HOST_SCHEDULED_RUN first)."""
     host = os.environ.get("CLAUDE_CODE_HOST_SESSION_ID", "")
     root = store_root()
     if not (host.startswith("local_") and root):

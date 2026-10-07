@@ -64,11 +64,18 @@ class DetectionTest(unittest.TestCase):
         self.assertIsNone(appsessions.scheduled_task_for(NORMAL))
         self.assertIsNone(appsessions.scheduled_task_for(""))
 
-    def test_hook_stays_silent_for_a_scheduled_session(self):
+    def _hook(self):
         import freshness_hook
         hook = importlib.reload(freshness_hook)
+        patcher = mock.patch.object(hook, "_log")       # keep the real hook log clean
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return hook
+
+    def test_hook_stays_silent_for_a_scheduled_session(self):
+        hook = self._hook()
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_HOST_SESSION_ID": "",
-                                          "CLAUDE_CODE_SESSION_ATTENDED": "1"}):
+                                          "CLAUDE_CODE_HOST_SCHEDULED_RUN": ""}):
             self.assertTrue(hook._scheduled_session(SCHED))
             self.assertFalse(hook._scheduled_session(NORMAL))
 
@@ -80,12 +87,20 @@ class DetectionTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_HOST_SESSION_ID": "local_n"}):
             self.assertIsNone(appsessions.current_scheduled_task())
 
-    def test_an_unattended_session_is_silent_whatever_the_store_says(self):
-        import freshness_hook
-        hook = importlib.reload(freshness_hook)
-        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ATTENDED": "0",
+    def test_the_apps_scheduled_run_flag_wins_before_the_session_file_exists(self):
+        # The app writes the session file seconds after SessionStart, so at hook time
+        # only CLAUDE_CODE_HOST_SCHEDULED_RUN can say this is a scheduled run.
+        hook = self._hook()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_HOST_SCHEDULED_RUN": "1",
+                                          "CLAUDE_CODE_HOST_SESSION_ID": "local_not_written_yet"}):
+            self.assertTrue(hook._scheduled_session("brand-new-cli-id"))
+
+    def test_attended_flag_alone_does_not_make_a_session_scheduled(self):
+        hook = self._hook()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ATTENDED": "1",
+                                          "CLAUDE_CODE_HOST_SCHEDULED_RUN": "",
                                           "CLAUDE_CODE_HOST_SESSION_ID": ""}):
-            self.assertTrue(hook._scheduled_session(NORMAL))
+            self.assertFalse(hook._scheduled_session(NORMAL))
 
 
 class PrepareSkipsScheduledTest(unittest.TestCase):

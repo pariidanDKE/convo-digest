@@ -229,12 +229,17 @@ def _nightly_installed() -> bool:
 def _scheduled_session(session_id: str) -> bool:
     """Whether this session is a Desktop scheduled-task run (the nightly digest, a standup
     brief, …). Nobody is there to answer a nudge, and an unattended run that acts on one
-    writes guessed preferences (#17) — so those sessions get no nudge at all. The app's
-    own signals come first (it marks unattended sessions and names the app session in
-    the environment); the session-file scan is the fallback, reading only files touched
-    in the last few minutes."""
-    attended = os.environ.get("CLAUDE_CODE_SESSION_ATTENDED")
-    host = os.environ.get("CLAUDE_CODE_HOST_SESSION_ID", "")
+    writes guessed preferences (#17) — so those sessions get no nudge at all.
+
+    The desktop app marks a scheduled run with CLAUDE_CODE_HOST_SCHEDULED_RUN=1 in the
+    CLI's environment, which is the only signal available this early: the app writes the
+    session's file (with scheduledTaskId) some seconds AFTER SessionStart, and it reports
+    CLAUDE_CODE_SESSION_ATTENDED=1 even for scheduled runs. The session-file lookups stay
+    as a fallback for a later re-fire."""
+    host_flag = os.environ.get("CLAUDE_CODE_HOST_SCHEDULED_RUN")
+    if host_flag == "1":
+        _log("scheduled-check: CLAUDE_CODE_HOST_SCHEDULED_RUN=1 -> True")
+        return True
     try:
         sys.path.insert(0, SRC)
         import appsessions
@@ -243,10 +248,10 @@ def _scheduled_session(session_id: str) -> bool:
     except Exception as e:
         _log(f"scheduled-check error: {e}")
         task = None
-    scheduled = attended == "0" or bool(task)
+    host = os.environ.get("CLAUDE_CODE_HOST_SESSION_ID", "")
     _log(f"scheduled-check session={session_id or '-'} host={host or '-'} "
-         f"attended={attended} task={task} src={SRC} -> {scheduled}")
-    return scheduled
+         f"scheduled_run_flag={host_flag} task={task} -> {bool(task)}")
+    return bool(task)
 
 
 def _run_health() -> dict | None:
