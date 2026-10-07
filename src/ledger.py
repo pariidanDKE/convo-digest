@@ -84,7 +84,9 @@ def _session() -> str:
 
 def _detect_trigger(session_id: str) -> str:
     """'scheduled' when this session is a Desktop scheduled-task run, else 'manual'."""
-    return "scheduled" if APP.scheduled_task_for(session_id) else "manual"
+    scheduled = (os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "0"
+                 or APP.current_scheduled_task() or APP.scheduled_task_for(session_id))
+    return "scheduled" if scheduled else "manual"
 
 
 def _read_lock(path: str) -> dict | None:

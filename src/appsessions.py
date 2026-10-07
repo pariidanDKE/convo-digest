@@ -95,6 +95,27 @@ def scheduled_cli_ids(sessions: dict[str, list[tuple[str, dict]]] | None = None)
             if any(is_scheduled(s) for _, s in items)}
 
 
+def current_scheduled_task() -> str | None:
+    """The scheduled task behind the session THIS process runs in, or None. The desktop
+    app tells its CLI which app session it belongs to (CLAUDE_CODE_HOST_SESSION_ID, the
+    `local_…` id that names the session file), and that file carries scheduledTaskId
+    from the moment the run is created. That works at SessionStart, when the file does
+    not yet record the CLI session id that scheduled_task_for() matches on."""
+    host = os.environ.get("CLAUDE_CODE_HOST_SESSION_ID", "")
+    root = store_root()
+    if not (host.startswith("local_") and root):
+        return None
+    for path in glob.glob(os.path.join(root, "*", "*", f"{host}.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                session = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(session, dict) and is_scheduled(session):
+            return session["scheduledTaskId"]
+    return None
+
+
 def scheduled_task_for(cli_session_id: str, modified_within: float | None = None) -> str | None:
     """The scheduled task id behind this conversation, or None when it isn't a
     scheduled run (or has no app session at all)."""

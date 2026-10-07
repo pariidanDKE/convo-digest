@@ -67,8 +67,25 @@ class DetectionTest(unittest.TestCase):
     def test_hook_stays_silent_for_a_scheduled_session(self):
         import freshness_hook
         hook = importlib.reload(freshness_hook)
-        self.assertTrue(hook._scheduled_session(SCHED))
-        self.assertFalse(hook._scheduled_session(NORMAL))
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_HOST_SESSION_ID": "",
+                                          "CLAUDE_CODE_SESSION_ATTENDED": "1"}):
+            self.assertTrue(hook._scheduled_session(SCHED))
+            self.assertFalse(hook._scheduled_session(NORMAL))
+
+    def test_the_app_session_named_in_the_env_is_found_before_it_records_the_cli_id(self):
+        # At SessionStart the app session file exists (with scheduledTaskId) but does not
+        # yet carry the CLI session id, so only the host id the app exports can find it.
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_HOST_SESSION_ID": "local_s"}):
+            self.assertEqual(appsessions.current_scheduled_task(), "convo-digest-nightly")
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_HOST_SESSION_ID": "local_n"}):
+            self.assertIsNone(appsessions.current_scheduled_task())
+
+    def test_an_unattended_session_is_silent_whatever_the_store_says(self):
+        import freshness_hook
+        hook = importlib.reload(freshness_hook)
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ATTENDED": "0",
+                                          "CLAUDE_CODE_HOST_SESSION_ID": ""}):
+            self.assertTrue(hook._scheduled_session(NORMAL))
 
 
 class PrepareSkipsScheduledTest(unittest.TestCase):

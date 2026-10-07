@@ -229,12 +229,17 @@ def _nightly_installed() -> bool:
 def _scheduled_session(session_id: str) -> bool:
     """Whether this session is a Desktop scheduled-task run (the nightly digest, a standup
     brief, …). Nobody is there to answer a nudge, and an unattended run that acts on one
-    writes guessed preferences (#17) — so those sessions get no nudge at all. Only the
-    session files touched in the last few minutes are read: the one starting now."""
+    writes guessed preferences (#17) — so those sessions get no nudge at all. The app's
+    own signals come first (it marks unattended sessions and names the app session in
+    the environment); the session-file scan is the fallback, reading only files touched
+    in the last few minutes."""
+    if os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "0":
+        return True
     try:
         sys.path.insert(0, SRC)
         import appsessions
-        return bool(appsessions.scheduled_task_for(session_id, modified_within=600))
+        return bool(appsessions.current_scheduled_task()
+                    or appsessions.scheduled_task_for(session_id, modified_within=600))
     except Exception as e:
         _log(f"scheduled-check error: {e}")
         return False
@@ -416,7 +421,7 @@ def main() -> None:
 
     # Scheduled-task runs (the nightly itself, a standup brief) get no nudge: nobody is
     # there to answer it, and acting on one unattended writes guessed preferences (#17).
-    if _SESSION and _scheduled_session(_SESSION):
+    if _scheduled_session(_SESSION):
         _log("silent (scheduled-task run)")
         _emit()
 
