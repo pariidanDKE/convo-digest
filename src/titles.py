@@ -14,12 +14,18 @@ sessions need it:
 Per app session of an indexed conversation:
   - already shows the digest title        → current (nothing to do)
   - titleSource "auto" (app-generated)    → rename, via the app tool
-  - titleSource "user", and it is a title WE wrote earlier (provenance.app_title_written)
+  - titleSource "tool" (set through the rename tool), and it is the title WE planned
+    last time (provenance.app_title_written) → ours but stale: rename, via the app tool
+  - titleSource "user", and it is a title WE wrote into the file in an older version
                                           → ours but stale: written to the file here,
                                             because the app tool would treat it as the
                                             user's own name and decline unattended
-  - anything else (a name you chose, a fork) → left alone
+  - anything else (a name you chose, another tool's rename, a fork) → left alone
   - a scheduled-task run                  → left alone (they're kept out of the index)
+
+A planned rename is recorded in provenance.app_title_written straight away, so the
+next run recognises the title as ours even if the conversation is re-digested (and
+re-titled) before that run sees the rename land.
 
 It re-checks EVERY indexed conversation, not just the ones digested this run, so a
 title the app reverted gets put back on the next run. Renames come back newest first:
@@ -77,11 +83,15 @@ def plan(index: dict, sessions: dict[str, list[tuple[str, dict]]], *,
                 if prov.get("app_title_written") != title:
                     prov["app_title_written"] = title    # remember it as ours
                     dirty = True
-            elif source == "auto":
+            elif source == "auto" or (source == "tool"
+                                      and shown == prov.get("app_title_written")):
                 counts["rename"] += 1
                 rename.append({"session": session.get("sessionId"), "title": title,
                                "was": shown, "_path": path,
                                "_activity": session.get("lastActivityAt") or 0})
+                if prov.get("app_title_written") != title:
+                    prov["app_title_written"] = title    # ours once the rename lands
+                    dirty = True
             elif source == "user" and shown == prov.get("app_title_written"):
                 if APP._write_one(path, title, shown) == title:
                     counts["ours_rewritten"] += 1

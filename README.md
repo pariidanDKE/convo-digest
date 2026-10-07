@@ -115,8 +115,8 @@ With title writeback on, each conversation gets the digest's title in two places
 
 App titles are set through the app's own rename tool after each run, and every indexed
 conversation is re-checked each time, so a title the app reverts is put back on the
-next run. Only titles the app generated are replaced; a name you gave a session
-yourself is never touched.
+next run. Only titles the app generated (or the digest set earlier) are replaced; a
+name you gave a session yourself is never touched.
 
 Know the app search's limits: it matches titles only across your **50 most recently
 active** sessions, and its text search scans message content (not titles) across

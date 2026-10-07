@@ -105,6 +105,27 @@ class PlanTest(unittest.TestCase):
         result, _ = self.plan(index, self.session("a", title="auto", titleSource="auto"))
         self.assertEqual([r["title"] for r in result["rename"]], ["final title"])
 
+    def test_a_planned_rename_is_remembered_as_ours_right_away(self):
+        index = {"k": record("a")}
+        _, dirty = self.plan(index, self.session("a", title="auto", titleSource="auto"))
+        self.assertTrue(dirty)
+        self.assertEqual(index["k"]["provenance"]["app_title_written"], DIGEST)
+
+    def test_our_tool_rename_is_refreshed_when_the_title_changes(self):
+        # The app marks set_session_title renames titleSource "tool". A re-digest that
+        # changes the title must replace our earlier rename through the tool again.
+        index = {"k": record("a", app_title_written="earlier digest title")}
+        result, _ = self.plan(index, self.session("a", title="earlier digest title",
+                                                  titleSource="tool"))
+        self.assertEqual([r["title"] for r in result["rename"]], [DIGEST])
+
+    def test_another_tool_rename_is_left_alone(self):
+        result, _ = self.plan({"k": record("a", app_title_written="something else")},
+                              self.session("a", title="Renamed on request",
+                                           titleSource="tool"))
+        self.assertEqual(result["rename"], [])
+        self.assertEqual(result["counts"]["user_named"], 1)
+
     def test_apply_files_writes_the_plan_when_the_rename_tool_is_missing(self):
         path, data = self.session("a", title="auto title", titleSource="auto")
         result, _ = self.plan({"k": record("a")}, (path, data), apply_files=True)

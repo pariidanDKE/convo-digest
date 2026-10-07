@@ -225,9 +225,9 @@ It prints `{"rename": [{"session", "title", "was"}, …], "counts": {…}}`, new
 sessions first. For each entry, call the app's rename tool
 `mcp__ccd_session_mgmt__set_session_title` with `session_id` = `session` and
 `title` = `title` (load it first with ToolSearch
-`select:mcp__ccd_session_mgmt__set_session_title` if it's deferred). These are all
-titles the app generated itself, so the app replaces them without asking. Calls are
-independent — send several per message.
+`select:mcp__ccd_session_mgmt__set_session_title` if it's deferred). Every entry is a
+title the app generated or one this digest set earlier through the same tool, so the
+app replaces it without asking. Calls are independent — send several per message.
 
 - If the app declines one, leave it, and log one `issue` (kind `rename-declined`)
   listing the declined sessions.
