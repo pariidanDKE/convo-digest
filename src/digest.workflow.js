@@ -5,7 +5,7 @@ export const meta = {
     { title: 'Prep', detail: 'enumerate changed convos, strip + tier (prepare.py)' },
     { title: 'Summarize', detail: 'one passive Read-only agent per whole-tier convo → 6-field record; gist tightener' },
     { title: 'Sample', detail: 'over-cap convos: convo-sampler reads a downsampled view, expands gaps via expand.py under a token budget → 6-field record' },
-    { title: 'Index', detail: 'parallel chunk-writes → one deterministic index.py merge; advance change-detector' },
+    { title: 'Index', detail: 'parallel chunk staging → one deterministic index.py merge; advance change-detector' },
   ],
 }
 
@@ -21,11 +21,22 @@ export const meta = {
 //               the downsampled view prepare.py wrote, optionally reveals hidden
 //               exchanges via expand.py (which enforces a hard token cap), and
 //               returns the same 6 fields. Same gist tightener.
-//   Index     : the validated records are written in small PARALLEL chunks (no single
+//   Index     : the validated records are staged in small PARALLEL chunks (no single
 //               agent re-serializes the whole batch — that was a slow, lossy serial
 //               step), then ONE `index.py --batch-glob` merge reads them all, builds
 //               lean records, merges the store, and advances the change-detector ONLY
 //               after each record is written (§4.5).
+//
+// RESULT: {status, summarized, indexed, lost, …}. `status` is what the digest skill's
+// drain loop keys on — never the counts alone, because a zero can mean two different
+// things (#15):
+//   'drained'  — prep found nothing left to summarize. Stop.
+//   'progress' — records landed this batch; launch the workflow again.
+//   'failed'   — there was work but nothing landed (prep died, every summarizer failed,
+//                the merge died). `stage` + `error` say where. Not a success.
+// `lost` counts work that was attempted but didn't land even when status is 'progress'
+// (a summarizer or chunk that failed); those convos are retried on a later run because
+// their change-detector never advanced.
 //
 // The orchestrator never reads conversation content (no fs access); each agent reads
 // exactly the file(s) it is pointed at. expand.py does all gap extraction so no
@@ -44,13 +55,14 @@ if (SRC === ['__CONVO', 'DIGEST_SRC__'].join('_')) throw new Error(
 const HOME  = A.home  || '~/.claude/digest'          // bash expands ~ in the runner
 const WORK  = A.work  || `${HOME}/work`
 const INDEX = A.index || `${HOME}/index.json`   // also the change-detector (provenance.last_ts per record)
-// The Index step's batch file is the ONLY thing an agent writes with the Write tool,
-// which is blocked under ~/.claude (protected dir) and outside cwd. So it lands in the
-// session cwd, NOT ${WORK} (=~/.claude/digest/work); index.py reads it (python3, which
-// can touch ~/.claude) and --cleanup unlinks it after. cwd-relative → works for both
-// the dev repo and a plugin user, wherever the job is launched.
-const BATCH_PREFIX = A.batchPrefix || '_digest_batch_'   // chunk files: _digest_batch_<i>.json
+// Index chunks are staged by `index.py --stage-chunk`, which reads the records on stdin
+// (a quoted heredoc) and writes them under prep's per-run stage_dir. No agent uses the
+// Write tool any more: unattended, it could wait forever on a permission prompt (#14),
+// and it could only write into the session cwd, where a dead run's chunk files lingered.
 const CHUNK = A.chunk || 6                                // records per chunk write (small → reliable)
+// Every runner Bash call gets the tool's maximum timeout: a cold-cache prepare.py can run
+// past the default 2 minutes and used to kill the whole run (#13).
+const BASH_TIMEOUT = 600000
 const MODEL = A.model || 'haiku'
 const LIMIT = A.limit || 20                           // whole-tier convos per run (batched draining)
 // Windowed backfill (issue: huge first run). SINCE limits summarization to convos
@@ -104,6 +116,8 @@ const PREP_SCHEMA = {
       },
     },
     counts: { type: 'object' },
+    stage_dir: { type: 'string' },
+    error: { type: 'string' },
   },
   required: ['convos'],
 }
@@ -114,29 +128,50 @@ const INDEX_RESULT_SCHEMA = {
     written: { type: 'integer' },
     index_size: { type: 'integer' },
     failed: { type: 'array', items: { type: 'object' } },
+    replayed: { type: 'boolean' },
+    error: { type: 'string' },
   },
   required: ['written'],
 }
 
 function wordCount(s) { return (s || '').trim().split(/\s+/).filter(Boolean).length }
 
+// A run with work to do that landed nothing. Returned (not thrown) so the skill can log
+// exactly where it broke; the skill treats it as a failure, never as "drained".
+function failed(stage, error, extra) {
+  log(`FAILED at ${stage}: ${error}`)
+  return { status: 'failed', stage, error, summarized: 0, indexed: 0, ...(extra || {}) }
+}
+
+const runCmd = (cmd, extra) =>
+  `Run this EXACT command with the Bash tool, passing timeout: ${BASH_TIMEOUT}, and return ` +
+  `its stdout JSON (it prints one JSON object):\n  ${cmd}\n` +
+  `Return the parsed object unchanged. ${extra || ''}`
+
 // --- Prep -------------------------------------------------------------------
 phase('Prep')
 const prepCmd = `python3 ${SRC}/prepare.py --work ${WORK} --index ${INDEX} --limit ${LIMIT}`
   + (SINCE ? ` --since ${SINCE}` : '') + (SEED_REST ? ' --seed-rest' : '')
 const prep = await agent(
-  `Run this EXACT command and return its stdout JSON (it prints one JSON object):\n` +
-  `  ${prepCmd}\n` +
-  `Return the parsed object unchanged.`,
+  runCmd(prepCmd, 'If the command fails or prints no JSON, return ' +
+    '{"convos": [], "error": "<its error output>"} — never an empty success.'),
   { schema: PREP_SCHEMA, agentType: RUNNER_AGENT, model: MODEL, label: 'prepare', phase: 'Prep' }
 )
-const all = (prep && prep.convos) || []
+if (!prep) return failed('prep', 'the prep agent died before returning (API error, ' +
+  'revoked login, or stalled)')
+if (prep.error) return failed('prep', prep.error)
+const all = prep.convos || []
 const whole = all.filter(c => c.tier === 'whole')
 const sampled = all.filter(c => c.tier === 'sample')
 const trivial = all.filter(c => c.tier === 'trivial')
 if (trivial.length) log(`${trivial.length} convo(s) under token floor → trivial (skipped — recall noise)`)
 log(`Prep: ${all.length} changed, ${whole.length} whole-tier, ${sampled.length} over-cap (sampler)`)
-if (!whole.length && !sampled.length) { log('nothing to summarize'); return { summarized: 0, indexed: 0 } }
+if (!whole.length && !sampled.length) {
+  log('nothing to summarize')
+  return { status: 'drained', summarized: 0, indexed: 0, counts: prep.counts || {} }
+}
+if (!prep.stage_dir) return failed('prep', 'prepare.py returned no stage_dir')
+const STAGE = prep.stage_dir
 
 // gist tightener — shared stage 2 for both tiers. `src` is the file the agent can
 // re-read if it needs to (the work file for whole, the view file for sampled).
@@ -155,6 +190,7 @@ const tightenStage = (agentType, phaseName) => async (item, c) => {
 }
 
 // --- Summarize whole-tier (+ gist tightener) -------------------------------
+const lostKeys = []          // convos whose summarizer/sampler produced nothing
 let wholeOk = []
 if (whole.length) {
   phase('Summarize')
@@ -168,6 +204,7 @@ if (whole.length) {
     tightenStage(SUMMARIZER_AGENT, 'Summarize')
   )
   wholeOk = results.filter(x => x && x.summary)
+  lostKeys.push(...whole.filter((c, i) => !(results[i] && results[i].summary)).map(c => c.key))
   log(`Summarize: ${wholeOk.length}/${whole.length} produced records`)
 }
 
@@ -189,11 +226,13 @@ if (sampled.length) {
     tightenStage(SAMPLER_AGENT, 'Sample')
   )
   sampleOk = results.filter(x => x && x.summary)
+  lostKeys.push(...sampled.filter((c, i) => !(results[i] && results[i].summary)).map(c => c.key))
   log(`Sample: ${sampleOk.length}/${sampled.length} produced records`)
 }
 
 const ok = [...wholeOk, ...sampleOk]
-if (!ok.length) return { summarized: 0, indexed: 0 }
+if (!ok.length) return failed('summarize',
+  `all ${whole.length + sampled.length} summarizer(s) failed`, { lost: { summaries: lostKeys } })
 
 // --- Index (parallel chunk-writes → one deterministic merge) ----------------
 // Records are already produced (validated) by the parallel summarizers. The old
@@ -207,39 +246,45 @@ phase('Index')
 const chunks = []
 for (let i = 0; i < ok.length; i += CHUNK) chunks.push(ok.slice(i, i + CHUNK))
 const CHUNK_SCHEMA = { type: 'object',
-  properties: { path: { type: 'string' }, count: { type: 'integer' } }, required: ['count'] }
+  properties: { path: { type: 'string' }, count: { type: 'integer' }, error: { type: 'string' } },
+  required: ['count'] }
+// JSON.stringify emits a single line, so the heredoc terminator can never appear inside it.
+const EOF_MARK = '__CONVO_DIGEST_CHUNK__'
 const writes = await parallel(chunks.map((chunk, i) => () => agent(
-  `Write this EXACT JSON array, verbatim and complete, to the file ${BATCH_PREFIX}${i}.json ` +
-  `in the current working directory using the Write tool (do NOT write under ~/.claude — ` +
-  `it's protected). Return {"path","count"} where count is the number of array elements ` +
-  `you wrote.\n\nARRAY (${chunk.length} elements):\n${JSON.stringify(chunk)}`,
+  `Stage these index records. Run the command below with the Bash tool, passing timeout: ` +
+  `${BASH_TIMEOUT}. Copy it exactly — the JSON line between the heredoc markers must be ` +
+  `verbatim and complete. Do NOT use the Write tool.\n\n` +
+  `python3 ${SRC}/index.py --stage-chunk ${STAGE}/chunk_${i}.json <<'${EOF_MARK}'\n` +
+  `${JSON.stringify(chunk)}\n${EOF_MARK}\n\n` +
+  `It prints {"path","count"} — return that. If it prints an "error" (the JSON didn't ` +
+  `survive the copy), run it once more, copying more carefully; if it fails again, return ` +
+  `its {"count": 0, "error": ...} output.`,
   { schema: CHUNK_SCHEMA, agentType: RUNNER_AGENT, model: MODEL,
     label: `batch:${i}`, phase: 'Index' }
 )))
-const wrote = writes.filter(Boolean)
-const wroteCount = wrote.reduce((n, w) => n + (w.count || 0), 0)
-if (wroteCount < ok.length) log(`Index: chunk-writes recorded ${wroteCount}/${ok.length} (merge will reconcile)`)
+const stagedCount = writes.reduce((n, w) => n + ((w && !w.error && w.count) || 0), 0)
+const lostChunks = chunks.filter((c, i) => !writes[i] || writes[i].error || writes[i].count < c.length)
+if (lostChunks.length) log(`Index: ${lostChunks.length}/${chunks.length} chunk(s) failed to stage`)
+if (!stagedCount) return failed('stage', 'no chunk could be staged',
+  { summarized: ok.length, lost: { summaries: lostKeys, chunks: lostChunks.length } })
 
-// The chunk-write agents don't necessarily share one cwd — a session can carry several
-// working directories (primary + additionalDirectories), and parallel agents scatter
-// across them. A lone RELATIVE glob run by the merge agent would then see only the
-// chunks in ITS cwd and silently orphan the rest: never merged, never counted as
-// `failed`, and their change-detector never advances, so they get re-summarized every
-// run (burning tokens) until a chunk happens to land where the merge looks. Fix: pass
-// each chunk's ABSOLUTE path (echoed by its writer) explicitly, plus the relative glob
-// as a cwd-local fallback for any writer that didn't report a path. index.py unions +
-// dedupes them (§4.5).
-const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`
-const mergePatterns = [shq(`${BATCH_PREFIX}*.json`)]
-  .concat(wrote.map(w => w.path).filter(Boolean).map(shq))
-  .join(' ')
+// One merge over this run's stage dir (absolute — the merge agent's cwd is irrelevant).
+// --result-file makes it safe to run twice: a retry after the merge already landed
+// replays the saved result instead of reporting written: 0 (N3).
+const mergeCmd = `python3 ${SRC}/index.py --batch-glob '${STAGE}/chunk_*.json' ` +
+  `--index ${INDEX} --model haiku-4-5 --cleanup --result-file ${STAGE}/merge_result.json`
+const merge = label => agent(runCmd(mergeCmd), {
+  schema: INDEX_RESULT_SCHEMA, agentType: RUNNER_AGENT, model: MODEL, label, phase: 'Index' })
+let idx = await merge('merge')
+if (!idx) { log('Index: merge agent died — retrying once'); idx = await merge('merge-retry') }
+if (!idx) return failed('merge', 'the merge agent died twice',
+  { summarized: ok.length, lost: { summaries: lostKeys, chunks: lostChunks.length } })
 
-const idx = await agent(
-  `Run this single command and return its stdout JSON (one object):\n` +
-  `  python3 ${SRC}/index.py --batch-glob ${mergePatterns} --index ${INDEX} --model haiku-4-5 --cleanup\n` +
-  `Return the parsed object unchanged.`,
-  { schema: INDEX_RESULT_SCHEMA, agentType: RUNNER_AGENT, model: MODEL, label: 'merge', phase: 'Index' }
-)
-log(`Index: merged ${idx && idx.written}/${ok.length} records → ${INDEX} (size ${idx && idx.index_size})`)
-return { summarized: ok.length, indexed: (idx && idx.written) || 0,
-         failed: (idx && idx.failed) || [] }
+const indexed = idx.written || 0
+log(`Index: merged ${indexed}/${ok.length} records → ${INDEX} (size ${idx.index_size})` +
+  (idx.replayed ? ' [replayed]' : ''))
+const lost = { summaries: lostKeys, chunks: lostChunks.length, merge: idx.failed || [] }
+if (!indexed) return failed('merge', idx.error || 'the merge wrote no records',
+  { summarized: ok.length, lost })
+return { status: 'progress', summarized: ok.length, indexed,
+         index_size: idx.index_size, lost, failed: idx.failed || [] }

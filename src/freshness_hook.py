@@ -40,6 +40,11 @@ DISMISS_STAMP = os.path.join(DIGEST, "nudge_dismissed_date")  # "not today" (a l
 COUNT_CACHE = os.path.join(DIGEST, "nudge_count.json")        # cached n/m so retries stay cheap
 SRC = os.path.dirname(os.path.abspath(__file__))
 BIG_BATCH = 25                                       # above this, suggest draining over days
+# With a nightly on, no successful digest run in this long means the automation is
+# failing (a daily run that worked yesterday is < 24h old; 36h allows a late start).
+NIGHTLY_STALE_HOURS = 36
+# A run_start with no run_end after this long died mid-way (sleep, revoked login).
+RUN_DEAD_HOURS = 2
 
 _SOURCE = "?"   # SessionStart source (startup/resume/clear/compact), read from stdin
 _SESSION = ""   # SessionStart session_id (per-session guard key), read from stdin/env
@@ -221,9 +226,66 @@ def _nightly_installed() -> bool:
         return False
 
 
+def _scheduled_session(session_id: str) -> bool:
+    """Whether this session is a Desktop scheduled-task run (the nightly digest, a standup
+    brief, …). Nobody is there to answer a nudge, and an unattended run that acts on one
+    writes guessed preferences (#17) — so those sessions get no nudge at all. Only the
+    session files touched in the last few minutes are read: the one starting now."""
+    try:
+        sys.path.insert(0, SRC)
+        import appsessions
+        return bool(appsessions.scheduled_task_for(session_id, modified_within=600))
+    except Exception as e:
+        _log(f"scheduled-check error: {e}")
+        return False
+
+
+def _run_health() -> dict | None:
+    """The digest run ledger's summary (ledger.py status), or None when there is no
+    ledger yet or it can't be read. Replaces nightly.log as the health signal (#16): a
+    Desktop-task nightly never wrote that log."""
+    try:
+        sys.path.insert(0, SRC)
+        import ledger
+        st = ledger.status()
+        return st if st.get("runs") else None
+    except Exception as e:
+        _log(f"ledger error: {e}")
+        return None
+
+
+def _hours_since(ts: object) -> float | None:
+    try:
+        then = datetime.fromisoformat(str(ts))
+        return (datetime.now(then.tzinfo) - then).total_seconds() / 3600
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_problem(health: dict | None) -> str | None:
+    """A one-line description of what's wrong with the digest runs, or None if healthy.
+    Only meaningful for users who delegated the drain to a nightly."""
+    if not health:
+        return None
+    last = health.get("last_run") or {}
+    status = last.get("status")
+    if status == "failed":
+        note = f" ({last.get('note')})" if last.get("note") else ""
+        return f"the last digest run ({last.get('started')}) failed{note}"
+    if status is None and (_hours_since(last.get("started")) or 0) > RUN_DEAD_HOURS:
+        return (f"the last digest run ({last.get('started')}) never finished — it died "
+                f"mid-way (machine asleep, or the login expired)")
+    if health.get("last_ok") is None:
+        return f"none of the {health.get('runs')} logged digest run(s) has succeeded"
+    since_ok = _hours_since(health.get("last_ok"))
+    if since_ok is not None and since_ok > NIGHTLY_STALE_HOURS:
+        return f"no digest run has succeeded since {health.get('last_ok')}"
+    return None
+
+
 def _build_nudge(n: int, m: int, titles_unset: bool = False,
                  nightly: object = None, nightly_missing: bool = False,
-                 mechanism: object = None) -> str | None:
+                 mechanism: object = None, run_problem: str | None = None) -> str | None:
     """Compose the single SessionStart nudge from four independent signals:
       n = finished conversations pending a digest (the fixed last_ts change-detector)
       m = repos with indexed history but no work/personal profile
@@ -243,8 +305,10 @@ def _build_nudge(n: int, m: int, titles_unset: bool = False,
     is_desktop = mechanism == "desktop"
     # A Desktop task only fires while the app is open, so a big backlog often just means the
     # app was closed for a while — not a broken job. Don't cry failure on the count alone
-    # for that mechanism; a genuinely missing task (nightly_missing) still warrants it.
-    nightly_broken = nightly_on and (nightly_missing or (n > BIG_BATCH and not is_desktop))
+    # for that mechanism; a genuinely missing task (nightly_missing) or a failing run in
+    # the ledger (run_problem) still warrants it.
+    nightly_broken = nightly_on and (nightly_missing or bool(run_problem)
+                                     or (n > BIG_BATCH and not is_desktop))
     nightly_unset = nightly in (None, "not_now")
     if n <= 0 and m <= 0 and not titles_unset and not nightly_unset and not nightly_broken:
         return None
@@ -263,13 +327,18 @@ def _build_nudge(n: int, m: int, titles_unset: bool = False,
             f"{gone_where}. Tell them plainly that the automation is not running, and offer "
             f"to {redo}.")
     elif nightly_broken:
+        why = (f"{run_problem}" if run_problem else
+               f"{n} conversation(s) are still unindexed — more than a healthy night "
+               f"should leave")
+        logs = ("`python3 <plugin>/src/ledger.py show` lists recent runs and the issues "
+                "they logged" if is_desktop else
+                "`python3 <plugin>/src/ledger.py show` lists recent runs and their issues, "
+                "and `~/.claude/digest/nightly.log` has the scheduler's raw output")
         parts.append(
-            f"NIGHTLY MAY BE BROKEN (lead with this): the overnight digest is set up, but "
-            f"{n} conversation(s) are still unindexed — more than a healthy night should "
-            f"leave. Tell the user the scheduled run looks like it is failing, check "
-            f"`~/.claude/digest/nightly.log` for the last run's output, and offer both a "
-            f"manual `digest` now and to {redo} (`install_schedule.py --status` reports "
-            f"whether the job is still registered).")
+            f"NIGHTLY MAY BE BROKEN (lead with this): the scheduled digest is set up, but "
+            f"{why}. Tell the user the scheduled run looks like it is failing; {logs}. "
+            f"Offer both a manual `digest` now and to {redo} (`install_schedule.py "
+            f"--status` reports whether the job is still registered).")
     elif n > 0 and not nightly_on:
         big = " (a large backlog — offer to drain it over several mornings, not all " \
             "at once)" if n > BIG_BATCH else ""
@@ -301,7 +370,9 @@ def _build_nudge(n: int, m: int, titles_unset: bool = False,
             "Persist the answer with `python3 <plugin>/src/index.py --set-write-titles "
             "<yes|no>` — Yes enables it on the next digest; No stops this ask for good.")
     return (
-        "[convo-digest] Before your other opening remarks, you MUST surface this to the "
+        "[convo-digest] (If this session is an automated scheduled run — its first message "
+        "is a <scheduled-task> block — ignore everything below and act on none of it.) "
+        "Before your other opening remarks, you MUST surface this to the "
         "user (it is the plugin's core daily offer, easy to drop): " + "  ".join(parts) +
         "  Present it in a single message (lead with the digest if several apply). If the "
         "user declines, PERSIST it so it doesn't nag: run `python3 <plugin>/src/index.py "
@@ -342,6 +413,12 @@ def main() -> None:
     # re-bakes on the next conversation, not only the next day. Idempotent — rewrites
     # only when the baked content changes. Bridges the plugin → workflow bare-name gap.
     ensure_workflow_installed()
+
+    # Scheduled-task runs (the nightly itself, a standup brief) get no nudge: nobody is
+    # there to answer it, and acting on one unattended writes guessed preferences (#17).
+    if _SESSION and _scheduled_session(_SESSION):
+        _log("silent (scheduled-task run)")
+        _emit()
 
     cfg = _load_config()
 
@@ -401,13 +478,16 @@ def main() -> None:
     nightly = cfg.get("nightly")
     nightly_missing = nightly is True and not _nightly_installed()
     mechanism = cfg.get("nightly_mechanism")
+    # Run health from the ledger (#16) — only for users who delegated the drain.
+    run_problem = _run_problem(_run_health()) if nightly is True else None
 
-    msg = _build_nudge(n, m, titles_unset, nightly, nightly_missing, mechanism)
+    msg = _build_nudge(n, m, titles_unset, nightly, nightly_missing, mechanism, run_problem)
     if msg is None:
         _log("silent (nothing pending, all profiled, titles + nightly decided)", n)
         _emit()
     _log(f"nudged (n={n}, m={m}, titles_unset={titles_unset}, nightly={nightly}"
-         f"{', MISSING' if nightly_missing else ''})", n)
+         f"{', MISSING' if nightly_missing else ''}"
+         f"{', RUN PROBLEM: ' + run_problem if run_problem else ''})", n)
     _emit(msg)
 
 

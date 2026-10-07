@@ -10,7 +10,9 @@ the detector is advanced only after a summary is actually written (SPEC §4.5), 
 crash never marks a convo done that wasn't.
 
 Output (stdout): {"convos": [{id, project, source, work_path, tier, tokens, last_ts}],
-                  "counts": {...}, "cap", "counter"}
+                  "counts": {...}, "stage_dir", "cap", "counter"}
+`stage_dir` is a fresh per-run directory where the workflow stages index chunks.
+Scheduled-task runs (Desktop app) are skipped unless --include-scheduled.
 Per-convo work file: <work>/<id>.json = {id, source, facets, exchanges}
 """
 from __future__ import annotations
@@ -20,6 +22,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -27,6 +30,29 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(__file__))
 import transcript as T  # noqa: E402
 import tokens as TK  # noqa: E402
+import appsessions as APP  # noqa: E402
+
+STAGE_KEEP_SEC = 2 * 86400   # leftover chunk dirs from runs that died are pruned after this
+
+
+def new_stage_dir(work: str) -> str:
+    """A fresh per-run directory for the index chunk files, under the work dir (never
+    the session cwd — chunks left there by a dead run used to linger in a repo). Also
+    prunes stage dirs older than STAGE_KEEP_SEC: their convos were never merged, so the
+    change-detector simply picks them up again."""
+    root = os.path.join(work, "batches")
+    os.makedirs(root, exist_ok=True)
+    now = time.time()
+    for d in glob.glob(os.path.join(root, "*")):
+        try:
+            if now - os.path.getmtime(d) > STAGE_KEEP_SEC:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    path = os.path.join(root, f"{stamp}-{os.getpid()}")
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def render_exchanges(tr: "T.Transcript") -> list[dict]:
@@ -178,6 +204,10 @@ def main() -> int:
     ap.add_argument("--seed-state", action="store_true",
                     help="skip backfill: stamp a stub record (last_ts only, no summary) for "
                          "every existing convo so the index starts forward-only. One-time.")
+    ap.add_argument("--include-scheduled", action="store_true",
+                    help="also digest scheduled-task runs (the nightly digest itself, "
+                         "standup briefs, …). Off by default: they are recall noise, and "
+                         "the app resets their titles anyway.")
     ap.add_argument("--count-only", action="store_true",
                     help="cheap pending count for the freshness hook and the digest skill's "
                          "preflight: how many FINISHED (prior-day) convos differ from the "
@@ -187,6 +217,8 @@ def main() -> int:
 
     index = load_state(args.index)  # change-detector source: record provenance.last_ts
     counter = TK.default_counter()
+    # Scheduled-task runs (Desktop app) are kept out of the index entirely.
+    scheduled = set() if args.include_scheduled else APP.scheduled_cli_ids()
 
     # --- seed-state: one-time skip-backfill (see SPEC §7.1 / INSTALL) -----------
     # Stamp every existing convo as "handled" without summarizing, so the index is
@@ -229,6 +261,8 @@ def main() -> int:
             if not tr.exchanges:
                 continue
             cid = os.path.splitext(os.path.basename(f))[0]
+            if cid in scheduled:
+                continue
             key = f"{tr.facets.project}__{cid}"
             last_ts = tr.facets.last_ts
             if last_ts is None:
@@ -247,12 +281,13 @@ def main() -> int:
         return 0
 
     os.makedirs(args.work, exist_ok=True)  # full mode only — keeps --count-only write-free
+    stage_dir = new_stage_dir(args.work)
 
     convos = []
     n_whole = 0
     counts = {"files": 0, "sidechain_or_empty": 0, "unchanged": 0, "changed": 0,
               "trivial": 0, "trivial_stubbed": 0, "active_skipped": 0,
-              "skipped_old": 0, "seeded": 0}
+              "skipped_old": 0, "seeded": 0, "scheduled_skipped": 0}
     now = time.time()
 
     for f in glob.glob(os.path.join(args.projects, "**", "*.jsonl"), recursive=True):
@@ -270,6 +305,9 @@ def main() -> int:
         # re-summarized every batch, never letting the drain reach summarized:0.
         if args.exclude_session and cid == args.exclude_session:
             counts["active_skipped"] += 1
+            continue
+        if cid in scheduled:
+            counts["scheduled_skipped"] += 1
             continue
         # Skip a transcript still being written (e.g. a second concurrent session):
         # a moving target re-summarized every run until it goes idle. Picked up next
@@ -374,7 +412,7 @@ def main() -> int:
         with open(args.index, "w", encoding="utf-8") as fh:
             json.dump(index, fh, ensure_ascii=False, indent=2)
 
-    print(json.dumps({"convos": convos, "counts": counts,
+    print(json.dumps({"convos": convos, "counts": counts, "stage_dir": stage_dir,
                       "cap": args.cap, "counter": counter.name}, indent=2))
     return 0
 

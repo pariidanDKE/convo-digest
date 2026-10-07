@@ -102,5 +102,58 @@ class NudgeRemediationTest(unittest.TestCase):
         self.assertIn("NIGHTLY MAY BE BROKEN", msg)
 
 
+    def test_failing_runs_in_the_ledger_are_broken_for_desktop(self):
+        msg = self.hook._build_nudge(0, 0, nightly=True, mechanism="desktop",
+                                     run_problem="the last digest run failed")
+        self.assertIn("NIGHTLY MAY BE BROKEN", msg)
+        self.assertIn("ledger.py show", msg)
+        self.assertNotIn("nightly.log", msg)
+
+    def test_every_nudge_tells_a_scheduled_run_to_ignore_it(self):
+        msg = self.hook._build_nudge(3, 2, nightly=None)
+        self.assertIn("<scheduled-task>", msg)
+
+
+class RunProblemTest(unittest.TestCase):
+    """freshness_hook._run_problem reads the ledger summary (#16)."""
+
+    def setUp(self):
+        import freshness_hook
+        self.hook = importlib.reload(freshness_hook)
+
+    def _ago(self, hours):
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+    def test_no_ledger_yet_is_not_a_problem(self):
+        self.assertIsNone(self.hook._run_problem(None))
+
+    def test_healthy_recent_run(self):
+        t = self._ago(3)
+        self.assertIsNone(self.hook._run_problem(
+            {"runs": 5, "last_run": {"started": t, "status": "ok"}, "last_ok": t}))
+
+    def test_last_run_failed(self):
+        msg = self.hook._run_problem({"runs": 5, "last_ok": self._ago(30), "last_run": {
+            "started": self._ago(3), "status": "failed", "note": "prep 401"}})
+        self.assertIn("failed", msg)
+        self.assertIn("prep 401", msg)
+
+    def test_a_run_that_never_ended(self):
+        msg = self.hook._run_problem({"runs": 5, "last_ok": self._ago(30), "last_run": {
+            "started": self._ago(5), "status": None}})
+        self.assertIn("never finished", msg)
+
+    def test_a_run_still_in_progress_is_not_flagged(self):
+        self.assertIsNone(self.hook._run_problem({"runs": 5, "last_ok": self._ago(20),
+            "last_run": {"started": self._ago(0.2), "status": None}}))
+
+    def test_no_success_in_36_hours(self):
+        t = self._ago(50)
+        msg = self.hook._run_problem(
+            {"runs": 5, "last_run": {"started": t, "status": "ok"}, "last_ok": t})
+        self.assertIn("no digest run has succeeded", msg)
+
+
 if __name__ == "__main__":
     unittest.main()
