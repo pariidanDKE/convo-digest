@@ -18,7 +18,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import titles  # noqa: E402
 
-DIGEST = "69083: Ask Sandra 1.0 leftovers inventory and removal plan"
+DIGEST = "69083: Ask Atlas 1.0 leftovers inventory and removal plan"
 
 
 def record(cli, title=DIGEST, **prov):

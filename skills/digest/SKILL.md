@@ -77,6 +77,12 @@ yet in the index. It does not strip, tokenize, or write anything.
   and 4 — the title sync puts back reverted titles even on a quiet day, and the
   run must be closed. (Today's still-live work is deliberately excluded — it gets
   picked up by a later run once the session is done.)
+- **Invoked with `now`** (`/convo-digest:digest now` — Mission Control's
+  *Summarize now* button sends exactly this): the person wants today's
+  conversations summarized as well, so never take the `N == 0` exit — go on to
+  step 2 whatever `N` is. The workflow's own prep already includes today's
+  conversations that have been idle for a minute; the session you are running in
+  is always left out, since it is still being written.
 - Otherwise report `N` and note this will spend tokens + take a few minutes
   (each whole-tier convo is one Haiku summarizer agent).
 
