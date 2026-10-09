@@ -377,6 +377,21 @@ describe('mission control', () => {
     await band.unmount()
   })
 
+  test('the band summarizes the chat it sits in, on request', async ($, on) => {
+    const calls = world(on)
+    await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'mission', args: '', origin: { kind: 'composer' },
+      presentation: { isFullscreen: true, columns: 160 } })
+    const band = await $.ui.mount({ plugin: 'convo-digest', surface: 'desktop', component: 'AbovePrompt',
+      props: { hasSurvey: false } as never })
+    // this chat isn't summarized yet in the fixture
+    expect(await band.find({ key: 'band-summarize', text: /^Summarize this chat$/ })).toBeDefined()
+    await band.press({ key: 'band-summarize' })
+    expect(calls.prompts).toEqual(['/convo-digest:digest conversation self-session'])
+    expect(await band.find({ key: 'band-summarize', text: /Summarizing this chat…/ })).toBeDefined()
+    await band.unmount()
+  })
+
   test('Summarize now hands the digest a turn and refreshes when that turn ends', async ($, on) => {
     const calls = world(on)
     await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })

@@ -313,7 +313,9 @@ def main() -> int:
         # Skip the live session: its transcript grows on every turn (including the
         # digest's own activity), so it's perpetually "changed" and would be
         # re-summarized every batch, never letting the drain reach summarized:0.
-        if args.exclude_session and cid == args.exclude_session:
+        # Unless it is the one conversation asked for (--only): then it is summarized
+        # as it stands, once.
+        if args.exclude_session and cid == args.exclude_session and cid != args.only:
             counts["active_skipped"] += 1
             continue
         if cid in scheduled:

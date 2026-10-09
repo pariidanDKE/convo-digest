@@ -576,7 +576,7 @@ async function sessionAction($: $T, s: McSession, verb: SessionVerb): Promise<vo
  * conversation (`/convo-digest:digest conversation <id>`), even if it is unchanged. The
  * pane refreshes when the turn ends. One at a time.
  */
-async function summarizeOne($: $T, s: McSession): Promise<void> {
+async function summarizeOne($: $T, s: Pick<McSession, 'id' | 'title' | 'digested'>): Promise<void> {
   if (await read($, resummarizingAtom)) return
   await update($, resummarizingAtom, () => s.id)
   $.ui.toast(`${s.digested ? 'Re-summarizing' : 'Summarizing'} “${truncate(s.title, 40)}”`)
@@ -587,11 +587,10 @@ async function summarizeOne($: $T, s: McSession): Promise<void> {
   })
 }
 
-/** Summarize or Re-summarize — not for the session the pane runs in (the digest leaves
- *  out the session running it) nor routine runs (kept out of the digest). */
+/** Summarize or Re-summarize — not for routine runs, which the digest keeps out. */
 function SummarizeButton(el: El, $: $T, s: McSession, key: string, self: string, busy: string | null) {
   const { Button } = el
-  if (s.scheduled || s.id === self) return null
+  if (s.scheduled) return null
   const label = busy === s.id ? 'Summarizing…' : s.digested ? 'Re-summarize' : 'Summarize'
   return <Button key={key} label={label} plain dimColor onPress={() => { void summarizeOne($, s) }} />
 }
@@ -1002,12 +1001,22 @@ export const register: Register = on => {
     const home = await readHome($)
     const homeApp = home?.app ?? null
     const elsewhere = homeApp !== null && home?.cli !== selfId
+    // this chat, summarized now or again (the digest summarizes the chat it runs in only
+    // when asked for it by id)
+    const here = snap?.sessions.find(s => s.id === selfId)
+    const busy = await read($, resummarizingAtom)
+    const thisChat = { id: selfId, title: here?.title ?? 'this chat', digested: here?.digested ?? false }
     return (
       <Box flexDirection="row" gap={2}>
         {elsewhere
           ? <Button key="band-open" label="◉ Mission Control ↗" plain onPress={() => { void goHome($) }} />
           : <Button key="band-open" label="◉ Mission Control" plain onPress={() => { void openPane($) }} />}
         {elsewhere ? <Button key="band-here" label="open here" plain dimColor onPress={() => { void openPane($) }} /> : null}
+        {selfId && !here?.scheduled
+          ? <Button key="band-summarize" plain dimColor
+              label={busy === selfId ? 'Summarizing this chat…' : thisChat.digested ? 'Re-summarize this chat' : 'Summarize this chat'}
+              onPress={() => { void summarizeOne($, thisChat) }} />
+          : null}
         <Text dimColor wrap="truncate-end">{bits.join(' · ')}</Text>
       </Box>
     )
