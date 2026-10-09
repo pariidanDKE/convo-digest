@@ -1,6 +1,8 @@
 {
   "name": "pariidan-plugins",
-  "owner": { "name": "Dan" },
+  "owner": {
+    "name": "Dan"
+  },
   "metadata": {
     "description": "Personal plugins by Dan. Currently: convo-digest — local conversation summarization + recall for Claude Code."
   },
@@ -8,7 +10,7 @@
     {
       "name": "convo-digest",
       "source": ".",
-      "description": "Summarize finished Claude Code conversations into a searchable recall index; surface relevant past work on new sessions."
+      "description": "Summarize finished Claude Code conversations into a searchable recall index, surface relevant past work on new sessions, and see it all in Mission Control: your standup, an Ask bar, and a timeline grouped by workstream."
     }
   ]
 }
