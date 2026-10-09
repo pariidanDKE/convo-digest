@@ -134,16 +134,18 @@ async function loadTasks($: $T): Promise<McTask[] | null> {
 
 const MARK: Record<string, string> = { ok: '✓', nothing: '✓', warn: '!', failed: '✗', running: '…' }
 
+/** The status line says only what needs attention (a routine whose last run failed or
+ *  warned, digest issues since its last good run) and is empty otherwise. */
 function statusLine($: $T, snap: McSnapshot): void {
-  const parts = ['◉ MC']
+  const parts: string[] = []
   for (const r of snap.routines.filter(x => !x.oneTime)) {
     const run = r.runs[0]
-    if (run) parts.push(`${routineName(r).toLowerCase()} ${MARK[run.status] ?? '?'}`)
+    if (run && (run.status === 'failed' || run.status === 'warn')) {
+      parts.push(`${routineName(r).toLowerCase()} ${MARK[run.status]}`)
+    }
   }
-  const label = snap.range.key === 'today' ? 'today' : snap.range.label.toLowerCase()
-  parts.push(`${snap.totals.open} open ${label}`)
   if (snap.digest.issuesSinceOk) parts.push(`${snap.digest.issuesSinceOk} digest issue(s)`)
-  $.ui.status(parts.join(' · '))
+  $.ui.status(parts.length ? `◉ MC · ${parts.join(' · ')}` : undefined)
 }
 
 /** A local calendar day `back` days before `now`, as YYYY-MM-DD and as a label. */
@@ -991,11 +993,6 @@ export const register: Register = on => {
     if (e.props.hasSurvey || !(await read($, bandAtom))) return next(e)
     const snap = await read($, snapAtom)
     const { Box, Text, Button } = $.ui.resolve(e)
-    const bits: string[] = []
-    if (snap?.standup) bits.push(`${snap.standup.heading.replace(/^Standup script\s*/, 'standup ')} ready`)
-    const digest = snap?.routines.find(r => r.task === 'convo-digest-nightly')?.runs[0]
-    if (digest) bits.push(`digest ${digest.status === 'failed' ? '✗' : digest.status === 'warn' ? '!' : '✓'}`)
-    if (snap) bits.push(`${snap.totals.conversations} conversations today`)
     // with a home session elsewhere the band goes there (its window, where it has one);
     // "here" still opens the pane in this chat
     const home = await readHome($)
@@ -1017,7 +1014,6 @@ export const register: Register = on => {
               label={busy === selfId ? 'Summarizing this chat…' : thisChat.digested ? 'Re-summarize this chat' : 'Summarize this chat'}
               onPress={() => { void summarizeOne($, thisChat) }} />
           : null}
-        <Text dimColor wrap="truncate-end">{bits.join(' · ')}</Text>
       </Box>
     )
   })

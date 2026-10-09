@@ -59,15 +59,15 @@ const PANE_PROPS = {
 }
 
 type Calls = { argv: string[][]; questions: string[]; opened: number; prompts: string[]; toasts: string[];
-  copied: string[] }
+  copied: string[]; status: (string | undefined)[] }
 
 /** The world beneath the plugin: the collector, `open`, the task server, the model. */
 /** Paths that exist on the test's disk beyond what the plugin wrote. */
 const exists = new Set<string>()
 
-function world(on: On, opts: { sessionId?: () => string } = {}): Calls {
+function world(on: On, opts: { sessionId?: () => string; snap?: McSnapshot } = {}): Calls {
   exists.clear()
-  const calls: Calls = { argv: [], questions: [], opened: 0, prompts: [], toasts: [], copied: [] }
+  const calls: Calls = { argv: [], questions: [], opened: 0, prompts: [], toasts: [], copied: [], status: [] }
   mock.clock(on, { now: at(11) })
   mock.store(on)
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
@@ -77,7 +77,10 @@ function world(on: On, opts: { sessionId?: () => string } = {}): Calls {
     return { value: { isPlaced: true as const } }
   })
   on('ui.panes', async () => ({ value: [] }))
-  on('ui.status', async () => ({ value: undefined }))
+  on('ui.status', async ($, e) => {
+    calls.status.push(e.text)
+    return { value: undefined }
+  })
   on('ui.toast', async ($, e) => {
     calls.toasts.push(String((e as { text?: unknown }).text ?? ''))
     return { value: undefined }
@@ -103,7 +106,7 @@ function world(on: On, opts: { sessionId?: () => string } = {}): Calls {
     isStderrTruncated: false } })
   on('process.run', async ($, e) => {
     calls.argv.push([...e.argv])
-    if (e.argv.includes('snapshot')) return ok(JSON.stringify(SNAP))
+    if (e.argv.includes('snapshot')) return ok(JSON.stringify(opts.snap ?? SNAP))
     if (e.argv.includes('move')) return ok(JSON.stringify({ ok: true }))
     if (e.argv.includes('transcript')) {
       return ok(JSON.stringify({ id: e.argv[e.argv.indexOf('--id') + 1], mtime: 1, total: 2, hidden: 0, turns: [
@@ -375,6 +378,26 @@ describe('mission control', () => {
     await band.press({ key: 'band-here' })
     expect(calls.opened).toBe(opened + 1)
     await band.unmount()
+  })
+
+  test('the status line is empty while all is well, and names only what failed', async ($, on) => {
+    const quiet = world(on)
+    await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'mission', args: '', origin: { kind: 'composer' },
+      presentation: { isFullscreen: true, columns: 160 } })
+    expect(quiet.status.length).toBeGreaterThan(0)
+    expect(quiet.status[quiet.status.length - 1]).toBeUndefined()
+  })
+
+  test('a failed routine shows on the status line', async ($, on) => {
+    const routine = SNAP.routines[0]!
+    const failed = { ...SNAP, routines: [{ ...routine, runs: [{ ...routine.runs[0]!, status: 'failed' }] }],
+      digest: { ...SNAP.digest, issuesSinceOk: 2 } }
+    const calls = world(on, { snap: failed })
+    await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'mission', args: '', origin: { kind: 'composer' },
+      presentation: { isFullscreen: true, columns: 160 } })
+    expect(calls.status[calls.status.length - 1]).toMatch(/^◉ MC · .*✗ · 2 digest issue\(s\)$/)
   })
 
   test('the band summarizes the chat it sits in, on request', async ($, on) => {
