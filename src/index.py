@@ -27,10 +27,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 import tokens as TK  # noqa: E402
 import repos as R  # noqa: E402
 import appsessions as APP  # noqa: E402
+import workstreams as WS  # noqa: E402
 
 PROMPT_VERSION = "v1"
 SCHEMA_VERSION = "4.7"
-SUMMARY_FIELDS = ("title", "topics", "gist", "status", "unresolved", "key_entities")
+SUMMARY_FIELDS = ("title", "topics", "gist", "status", "unresolved", "key_entities", "workstream", "kind")
 
 # Shared plugin config (tri-state `write_titles` and `nightly`: True | False | "not_now" |
 # absent; bool `nudge_disabled` for "stop the daily nudge for good"). `nightly` True means
@@ -191,6 +192,8 @@ def build_record(
     clean = {k: summary.get(k) for k in SUMMARY_FIELDS}
     clean["title"] = _truncate_title(clean.get("title") or "")
     clean["key_entities"] = _dedupe_entities(clean.get("key_entities") or [], facets)
+    if clean.get("kind") not in WS.KINDS:
+        clean["kind"] = None
 
     # --- facets: lean deterministic match keys only (SPEC §4.1) ---
     branches = facets.get("git_branches") or (
@@ -303,7 +306,7 @@ def _write_session_title(source: str, session_id: str, title: str,
 
 
 def _merge_items(items: list, index: dict, index_path: str,
-                 *, counter, repos, model: str, write_titles: bool = False) -> tuple[int, list]:
+                 *, counter, repos, model: str, write_titles: bool = False) -> tuple[int, list, list]:
     """Build a record per {key, work_path, summary} item and merge it into the index,
     persisting **after each record** so a crash mid-merge loses no completed work and
     leaves prior records' watermark intact (SPEC §4.5 — change detection now reads
@@ -319,16 +322,27 @@ def _merge_items(items: list, index: dict, index_path: str,
     provenance.title_written so a later re-digest recognises its own title as safe to
     refresh (vs a foreign one to leave alone). The desktop app's titles are NOT written
     here: they go through the app's own rename tool after the merge (titles.py), because
-    a direct write to its session store gets overwritten by the app. Returns
-    (written, failed)."""
-    written, failed = 0, []
+    a direct write to its session store gets overwritten by the app.
+
+    Each record's workstream is registered in workstreams.json (WS.register): a known
+    name, matched loosely or through an alias, is stored as registered; a new one is
+    added with the summarizer's one-line description. Returns (written, failed, the
+    workstreams this merge created)."""
+    written, failed, created = 0, [], []
+    registry = WS.load()
     for it in items:
         try:
             with open(it["work_path"], encoding="utf-8") as fh:
                 work = json.load(fh)
             summary = it["summary"]
             summary.pop("_context", None)
+            description = summary.pop("workstream_description", None)
             rec = build_record(work, summary, counter=counter, model=model, repos=repos)
+            name, is_new = WS.register(registry, rec["summary"].get("workstream"), description,
+                                       rec["provenance"].get("last_ts"))
+            rec["summary"]["workstream"] = name
+            if is_new:
+                created.append(name)
             old = index.get(it["key"])
             if old and old.get("curation"):       # carry archive state forward
                 rec["curation"] = old["curation"]
@@ -345,10 +359,11 @@ def _merge_items(items: list, index: dict, index_path: str,
                 rec["provenance"]["app_title_written"] = app_prev
             index[it["key"]] = rec
             _dump_json(index_path, index)         # persist per-record (crash-safe)
+            WS.save(registry)
             written += 1
         except (OSError, ValueError, KeyError) as e:
             failed.append({"key": it.get("key"), "error": str(e)})
-    return written, failed
+    return written, failed, created
 
 
 def run_batch(batch_path: str, index_path: str, *,
@@ -364,14 +379,14 @@ def run_batch(batch_path: str, index_path: str, *,
     with open(batch_path, encoding="utf-8") as fh:
         items = json.load(fh)
     index = _load_json(index_path)
-    written, failed = _merge_items(items, index, index_path,
-                                   counter=counter, repos=repos, model=model, write_titles=wt)
+    written, failed, created = _merge_items(items, index, index_path,
+                                            counter=counter, repos=repos, model=model, write_titles=wt)
     if cleanup:
         try:
             os.remove(batch_path)
         except OSError:
             pass
-    return {"written": written, "failed": failed, "index_size": len(index)}
+    return {"written": written, "failed": failed, "index_size": len(index), "new_workstreams": created}
 
 
 def run_batch_glob(patterns, index_path: str, *,
@@ -422,11 +437,11 @@ def run_batch_glob(patterns, index_path: str, *,
         except (OSError, ValueError) as e:
             failed.append({"file": f, "error": str(e)})
     index = _load_json(index_path)
-    written, item_failed = _merge_items(items, index, index_path,
-                                        counter=counter, repos=repos, model=model, write_titles=wt)
+    written, item_failed, created = _merge_items(items, index, index_path,
+                                                 counter=counter, repos=repos, model=model, write_titles=wt)
     failed.extend(item_failed)
     result = {"written": written, "failed": failed, "index_size": len(index),
-              "files": len(files)}
+              "files": len(files), "new_workstreams": created}
     if result_file:
         _dump_json(result_file, result)
     if cleanup:

@@ -129,7 +129,7 @@ flowchart TD
     N["🔔 SessionStart nudge<br/><i>“N finished convos aren't indexed — refresh?”</i>"]
     T[("📄 Local transcripts<br/>~/.claude/projects/…/*.jsonl")]
     P["<b>Prepare</b> · no model calls<br/>detect changed convos, strip to text,<br/>tier: whole / over-cap / trivial"]
-    S["<b>Summarize</b> · background workflow<br/>one small Haiku agent per convo<br/>→ 6-field record<br/>(title · topics · gist · status · unresolved · entities)"]
+    S["<b>Summarize</b> · background workflow<br/>one small Haiku agent per convo<br/>→ record<br/>(title · topics · gist · status · unresolved · entities · workstream · kind)"]
     I[("🗂 Recall index<br/>~/.claude/digest/index.json")]
     R["🔍 <b>/recall</b> — pull<br/>search past work,<br/>offer to resume it"]
     A["🧹 <b>/digest-archive</b> — push<br/>morning triage: archive<br/>what you're done with"]
@@ -146,9 +146,16 @@ conversations that changed since the last one.
 ## How it works
 
 - Reads your local Claude Code transcripts (`~/.claude/projects/**/*.jsonl`), strips
-  each to user+assistant text, and summarizes changed ones into a compact 6-field
-  record (title, topics, gist, status, unresolved, key entities) stored in
+  each to user+assistant text, and summarizes changed ones into a compact record
+  (title, topics, gist, status, unresolved, key entities, workstream, kind) stored in
   `~/.claude/digest/index.json`.
+- Every conversation is filed under a **workstream**: an epic-level goal that spans
+  several tickets and conversations ("Atlas AI tool access"). The list lives in
+  `~/.claude/digest/workstreams.json` and grows as new epics appear; the summarizer
+  reuses an existing name when one fits, and a small curator pass merges a new name
+  into an existing one when they are the same epic. Each conversation also gets a
+  **kind**: build, fix, review, investigate, plan or admin. Conversations summarized
+  before these existed are tagged from their stored summary, a few batches per run.
 - Large conversations are downsampled to a tail-weighted view and expanded on demand
   under a token budget, so no single summary blows the model's context.
 - Summarization runs as a background **workflow** orchestrating small Read-only

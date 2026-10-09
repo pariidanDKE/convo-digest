@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import transcript as T  # noqa: E402
 import tokens as TK  # noqa: E402
 import appsessions as APP  # noqa: E402
+import workstreams as WS  # noqa: E402
 
 STAGE_KEEP_SEC = 2 * 86400   # leftover chunk dirs from runs that died are pruned after this
 
@@ -277,7 +278,10 @@ def main() -> int:
                 continue  # today's / live work — not "finished"
             finished_unindexed += 1
         # Not "changed": full mode's `changed` uses different eligibility rules.
-        print(json.dumps({"finished_unindexed": finished_unindexed}))
+        # `untagged`: summarized records still without a workstream or kind, which the
+        # workflow's Tag phase works through a few batches per run.
+        untagged = sum(1 for r in index.values() if WS._needs_tags(r))
+        print(json.dumps({"finished_unindexed": finished_unindexed, "untagged": untagged}))
         return 0
 
     os.makedirs(args.work, exist_ok=True)  # full mode only — keeps --count-only write-free
@@ -285,6 +289,7 @@ def main() -> int:
 
     convos = []
     n_whole = 0
+    workstreams = None                                  # loaded with the first work file
     counts = {"files": 0, "sidechain_or_empty": 0, "unchanged": 0, "changed": 0,
               "trivial": 0, "trivial_stubbed": 0, "active_skipped": 0,
               "skipped_old": 0, "seeded": 0, "scheduled_skipped": 0}
@@ -348,6 +353,11 @@ def main() -> int:
         # Floor: a too-small convo is recall noise (1-line probes, aborted/denied
         # runs). Tier it 'trivial' and skip the work file — it's never summarized.
         tier = "trivial" if tiering.tokens < args.min_tokens else tiering.tier
+        if workstreams is None:
+            # the workstreams the summarizer picks from, at the top of every work and
+            # view file so the first Read of even a paginated file has them
+            workstreams = [{"name": r["name"], "description": r["description"]}
+                           for r in WS.listing(WS.load(), WS.PROMPT_LIMIT)]
         work_path = os.path.join(args.work, f"{key}.json")
         view_path = None
         if tier != "trivial":
@@ -356,8 +366,9 @@ def main() -> int:
                 # indent=1 keeps the file multi-line so the summarizer's Read can
                 # paginate it (offset/limit are line-based); a single-line dump is
                 # unreadable past Read's per-call cap on large convos. Minimal bloat.
-                json.dump({"key": key, "id": cid, "source": f, "facets": facets_dict(tr.facets),
-                           "exchanges": rendered}, wf, ensure_ascii=False, indent=1)
+                json.dump({"key": key, "id": cid, "source": f, "workstreams": workstreams,
+                           "facets": facets_dict(tr.facets), "exchanges": rendered},
+                          wf, ensure_ascii=False, indent=1)
             # Over-cap → also write the downsampled VIEW the convo-sampler reads first
             # (SPEC §4.2). The full file above stays on disk so expand.py can reveal
             # hidden exchanges into the view on demand, under the token-cap budget.
@@ -368,6 +379,7 @@ def main() -> int:
                 with open(view_path, "w", encoding="utf-8") as vf:
                     json.dump({
                         "key": key, "id": cid, "source": f, "over_cap": True,
+                        "workstreams": workstreams,
                         "facets": facets_dict(tr.facets),
                         "total_exchanges": len(rendered),
                         "budget": {"cap_tokens": args.cap,

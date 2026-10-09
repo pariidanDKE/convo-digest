@@ -20,6 +20,9 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import index  # noqa: E402
 
+# never the real ~/.claude/digest/workstreams.json: merges register workstreams there
+index.WS.PATH = os.path.join(tempfile.mkdtemp(), "workstreams.json")
+
 SUMMARY = {"title": "Fix the nightly", "topics": ["digest"], "gist": "It was fixed.",
            "status": "solved", "unresolved": None, "key_entities": []}
 
