@@ -209,6 +209,9 @@ def main() -> int:
                     help="also digest scheduled-task runs (the nightly digest itself, "
                          "standup briefs, …). Off by default: they are recall noise, and "
                          "the app resets their titles anyway.")
+    ap.add_argument("--only", default=None,
+                    help="summarize just this conversation (its session id), even when it is "
+                         "unchanged or still active: Mission Control's per-conversation button")
     ap.add_argument("--count-only", action="store_true",
                     help="cheap pending count for the freshness hook and the digest skill's "
                          "preflight: how many FINISHED (prior-day) convos differ from the "
@@ -297,6 +300,8 @@ def main() -> int:
 
     for f in glob.glob(os.path.join(args.projects, "**", "*.jsonl"), recursive=True):
         counts["files"] += 1
+        if args.only and os.path.splitext(os.path.basename(f))[0] != args.only:
+            continue                                    # one conversation asked for: skip the rest unread
         if os.path.basename(f).startswith("agent-"):  # subagent session — cheap skip
             counts["sidechain_or_empty"] += 1
             continue
@@ -317,7 +322,7 @@ def main() -> int:
         # Skip a transcript still being written (e.g. a second concurrent session):
         # a moving target re-summarized every run until it goes idle. Picked up next
         # run once quiet. mtime is cheaper + fresher than the parsed last_ts.
-        if args.active_window_sec > 0:
+        if args.active_window_sec > 0 and not args.only:
             try:
                 if (now - os.path.getmtime(f)) < args.active_window_sec:
                     counts["active_skipped"] += 1
@@ -328,7 +333,7 @@ def main() -> int:
         key = f"{tr.facets.project}__{cid}"
         last_ts = tr.facets.last_ts
         prior = index.get(key, {}).get("provenance", {}).get("last_ts")
-        if last_ts is not None and prior == last_ts:
+        if last_ts is not None and prior == last_ts and not args.only:
             counts["unchanged"] += 1
             continue
 

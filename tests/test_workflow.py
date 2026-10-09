@@ -137,5 +137,24 @@ class WorkflowTagTest(unittest.TestCase):
         self.assertEqual(result["stage"], "tag")
 
 
+@unittest.skipUnless(NODE, "node is not installed")
+class WorkflowOnlyTest(unittest.TestCase):
+    def test_one_conversation_is_prepared_on_its_own_and_nothing_else_is_tagged(self):
+        out = subprocess.run([NODE, HARNESS, json.dumps({
+            "args": {"src": "/plugin/src", "only": "a1f7abd5-0602-474d-a4b3-5b38ee22c20b"},
+            "prepare": PREP, "merge": {"written": 3, "index_size": 800}})],
+            capture_output=True, text=True, timeout=60)
+        data = json.loads(out.stdout)
+        self.assertIn("--only a1f7abd5-0602-474d-a4b3-5b38ee22c20b", data["prompts"]["prepare"])
+        self.assertFalse(any(c.startswith("untagged") for c in data["calls"]))
+        self.assertEqual(data["result"]["status"], "progress")
+
+    def test_an_id_that_could_reach_the_shell_is_refused(self):
+        out = subprocess.run([NODE, HARNESS, json.dumps({
+            "args": {"src": "/plugin/src", "only": "x; rm -rf ~"}, "prepare": PREP})],
+            capture_output=True, text=True, timeout=60)
+        self.assertIn("bad conversation id", out.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

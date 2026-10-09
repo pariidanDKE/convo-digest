@@ -78,6 +78,10 @@ const LIMIT = A.limit || 20                           // whole-tier convos per r
 // older convos as handled in the same pass so they don't linger as "pending".
 const SINCE = A.since || null
 const SEED_REST = A.seedRest || false
+// ONLY: summarize just this conversation (a session id), even unchanged or still active —
+// Mission Control's per-conversation Summarize button. Such a run tags nothing else.
+const ONLY = A.only || null
+if (ONLY && !/^[0-9A-Za-z-]{8,64}$/.test(ONLY)) throw new Error(`digest workflow: bad conversation id ${ONLY}`)
 // Agent names are NAMESPACED when installed as a plugin (convo-digest:<name>). The
 // freshness hook bakes the real namespace into __CONVO_DIGEST_NS__ at install time
 // (same mechanism as SRC). A user-level workflow has no plugin-namespace context, so
@@ -89,7 +93,7 @@ const SAMPLER_AGENT = A.samplerAgent || `${NS}convo-sampler`
 const TAGGER_AGENT = A.taggerAgent || `${NS}convo-tagger`
 const CURATOR_AGENT = A.curatorAgent || `${NS}workstream-curator`
 const TAG_BATCH = A.tagBatch || 25                    // records per tagger call
-const TAG_ROUNDS = A.tagRounds === undefined ? 4 : A.tagRounds   // tagger calls per run
+const TAG_ROUNDS = A.only ? 0 : A.tagRounds === undefined ? 4 : A.tagRounds   // tagger calls per run
 const KINDS = ['build', 'fix', 'review', 'investigate', 'plan', 'admin']
 const RUNNER_AGENT = A.runnerAgent || `${NS}digest-runner`
 const GIST_MAX_WORDS = A.gistMaxWords || 70          // target ~60; re-summarize above this
@@ -169,7 +173,7 @@ const runCmd = (cmd, extra) =>
 // --- Prep -------------------------------------------------------------------
 phase('Prep')
 const prepCmd = `python3 ${SRC}/prepare.py --work ${WORK} --index ${INDEX} --limit ${LIMIT}`
-  + (SINCE ? ` --since ${SINCE}` : '') + (SEED_REST ? ' --seed-rest' : '')
+  + (SINCE ? ` --since ${SINCE}` : '') + (SEED_REST ? ' --seed-rest' : '') + (ONLY ? ` --only ${ONLY}` : '')
 const prep = await agent(
   runCmd(prepCmd, 'If the command fails or prints no JSON, return ' +
     '{"convos": [], "error": "<its error output>"} — never an empty success.'),

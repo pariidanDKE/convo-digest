@@ -78,6 +78,14 @@ workstream and kind yet. It does not strip, tokenize, or write anything.
   and 4 — the title sync puts back reverted titles even on a quiet day, and the
   run must be closed. (Today's still-live work is deliberately excluded — it gets
   picked up by a later run once the session is done.)
+- **Invoked with `conversation <id>`** (`/convo-digest:digest conversation <session id>`
+  — Mission Control's per-conversation *Summarize* button sends exactly this): the
+  person wants that one conversation summarized now, even if it is unchanged or still
+  active. Skip this count and the drain loop: launch the workflow **once** as
+  `Workflow({ name: "digest", args: {"limit": 1, "only": "<id>"} })` (it summarizes
+  just that conversation and tags nothing else), then do steps 3 and 4 as usual. A
+  `drained` result means it was too short to summarize (under the token floor) or the
+  id matched no transcript: say which in your report.
 - **Invoked with `now`** (`/convo-digest:digest now` — Mission Control's
   *Summarize now* button sends exactly this): the person wants today's
   conversations summarized as well, so never take the `N == 0` exit — go on to
