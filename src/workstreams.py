@@ -175,7 +175,7 @@ def curate_file(new: list[str], out: str) -> dict:
     """What the curator reads: the workstreams this run created, and every workstream."""
     data = load()
     names = [n for n in (resolve(data, x) for x in new) if n]
-    every = [{"name": r["name"], "description": r["description"]} for r in listing(data)]
+    every = [{"name": r["name"], "description": r["description"], "count": r["count"]} for r in listing(data)]
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:
         json.dump({"new": [w for w in every if w["name"] in names], "all": every},
