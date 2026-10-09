@@ -12,8 +12,9 @@ let src = fs.readFileSync(path.join(__dirname, '..', 'src', 'digest.workflow.js'
 src = src.replace('export const meta', 'const meta')
 
 const calls = []
+const prompts = {}
 const SUMMARY = { title: 't', topics: ['x'], gist: 'short gist', status: 'solved',
-                  unresolved: null, key_entities: [] }
+                  unresolved: null, key_entities: [], workstream: 'Digest', kind: 'build' }
 const EOF_MARK = "<<'__CONVO_DIGEST_CHUNK__'\n"
 let sumIndex = 0
 
@@ -21,6 +22,7 @@ async function agent(prompt, opts) {
   const label = (opts && opts.label) || ''
   const kind = label.split(':')[0]
   calls.push(label)
+  prompts[label] = prompt
   let r = scenario[kind]
   if (kind === 'sum' && Array.isArray(r)) r = r[sumIndex++]
   if (r === undefined) r = 'ok'
@@ -32,6 +34,8 @@ async function agent(prompt, opts) {
     const line = prompt.slice(start, prompt.indexOf('\n', start))
     return { path: `/stage/${label}.json`, count: JSON.parse(line).length }
   }
+  // by default nothing waits for a tag, so a run without tagging behaves as before
+  if (kind === 'untagged') return { path: '/work/tags/batch.json', count: 0, remaining: 0 }
   throw new Error(`no stub for agent ${label}`)
 }
 
@@ -52,5 +56,5 @@ async function pipeline(items, ...stages) {
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const body = new AsyncFunction('args', 'agent', 'parallel', 'pipeline', 'phase', 'log', src)
 body(scenario.args || { src: '/plugin/src' }, agent, parallel, pipeline, () => {}, () => {})
-  .then(result => process.stdout.write(JSON.stringify({ result, calls })))
+  .then(result => process.stdout.write(JSON.stringify({ result, calls, prompts })))
   .catch(e => { process.stdout.write(JSON.stringify({ error: String(e), calls })); process.exit(1) })

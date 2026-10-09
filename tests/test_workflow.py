@@ -46,7 +46,8 @@ class WorkflowStatusTest(unittest.TestCase):
     def test_nothing_to_do_is_drained(self):
         result, calls = run(prepare={"convos": [], "counts": {}, "stage_dir": "/s"})
         self.assertEqual(result["status"], "drained")
-        self.assertEqual(calls, ["prepare"])
+        # nothing to summarize, and the tag check finds nothing waiting either
+        self.assertEqual(calls, ["prepare", "untagged:0"])
 
     def test_a_normal_batch_is_progress(self):
         result, calls = run(prepare=PREP, merge={"written": 3, "index_size": 800})
@@ -90,6 +91,69 @@ class WorkflowStatusTest(unittest.TestCase):
         self.assertIn("--stage-chunk", src)
         self.assertIn("--result-file", src)
         self.assertNotIn("using the Write tool", src)
+
+NOTHING = {"convos": [], "counts": {}, "stage_dir": "/s"}
+TAGS = {"tags": [{"key": "k1", "workstream": "Atlas AI tool access", "kind": "build"}]}
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class WorkflowTagTest(unittest.TestCase):
+    def test_older_records_are_tagged_a_few_batches_per_run(self):
+        result, calls = run(prepare=NOTHING,
+                            untagged={"path": "/w/tags/batch.json", "count": 20, "remaining": 50},
+                            tag=TAGS, apply={"applied": 20, "new": [], "skipped": []})
+        self.assertEqual(result["status"], "progress")
+        self.assertEqual(result["tagged"], 80)
+        self.assertEqual([c for c in calls if c.startswith("tag:")], ["tag:0", "tag:1", "tag:2", "tag:3"])
+        self.assertFalse(any(c.startswith("curate") for c in calls))
+
+    def test_new_workstreams_go_past_the_curator_and_duplicates_are_merged(self):
+        merges = {"merges": [{"from": "Atlas access", "into": "Atlas AI tool access"}]}
+        result, calls = run(prepare=NOTHING,
+                            untagged={"path": "/w/tags/batch.json", "count": 5, "remaining": 0},
+                            tag=TAGS, apply={"applied": 5, "new": ["Atlas access"], "skipped": []},
+                            **{"curate-file": {"path": "/w/tags/curate.json", "count": 1},
+                               "curate": merges,
+                               "merge-ws": {"merged": [{"from": "Atlas access",
+                                                        "into": "Atlas AI tool access", "records": 3}]}})
+        self.assertEqual(result["status"], "progress")
+        self.assertIn("curate", calls)
+        self.assertEqual(result["merged_workstreams"][0]["into"], "Atlas AI tool access")
+
+    def test_a_summary_run_that_creates_a_workstream_is_curated_too(self):
+        result, calls = run(prepare=PREP, merge={"written": 3, "index_size": 800,
+                                                 "new_workstreams": ["Mission Control and digest"]},
+                            **{"curate-file": {"path": "/w/tags/curate.json", "count": 1},
+                               "curate": {"merges": []}})
+        self.assertEqual(result["status"], "progress")
+        self.assertEqual(result["new_workstreams"], ["Mission Control and digest"])
+        self.assertNotIn("merge-ws", calls)          # nothing to merge, nothing run
+
+    def test_tagging_that_fails_with_work_waiting_is_a_failure_not_drained(self):
+        result, _ = run(prepare=NOTHING,
+                        untagged={"path": "/w/tags/batch.json", "count": 20, "remaining": 50},
+                        tag=None)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["stage"], "tag")
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class WorkflowOnlyTest(unittest.TestCase):
+    def test_one_conversation_is_prepared_on_its_own_and_nothing_else_is_tagged(self):
+        out = subprocess.run([NODE, HARNESS, json.dumps({
+            "args": {"src": "/plugin/src", "only": "a1f7abd5-0602-474d-a4b3-5b38ee22c20b"},
+            "prepare": PREP, "merge": {"written": 3, "index_size": 800}})],
+            capture_output=True, text=True, timeout=60)
+        data = json.loads(out.stdout)
+        self.assertIn("--only a1f7abd5-0602-474d-a4b3-5b38ee22c20b", data["prompts"]["prepare"])
+        self.assertFalse(any(c.startswith("untagged") for c in data["calls"]))
+        self.assertEqual(data["result"]["status"], "progress")
+
+    def test_an_id_that_could_reach_the_shell_is_refused(self):
+        out = subprocess.run([NODE, HARNESS, json.dumps({
+            "args": {"src": "/plugin/src", "only": "x; rm -rf ~"}, "prepare": PREP})],
+            capture_output=True, text=True, timeout=60)
+        self.assertIn("bad conversation id", out.stdout)
 
 
 if __name__ == "__main__":

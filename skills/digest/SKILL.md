@@ -70,19 +70,31 @@ python3 ${CLAUDE_PLUGIN_ROOT}/src/prepare.py --count-only \
   --index ~/.claude/digest/index.json
 ```
 
-It prints `{"finished_unindexed": N}` — finished (prior-day) conversations not
-yet in the index. It does not strip, tokenize, or write anything.
+It prints `{"finished_unindexed": N, "untagged": U}` — finished (prior-day)
+conversations not yet in the index, and summarized records that don't have a
+workstream and kind yet. It does not strip, tokenize, or write anything.
 
-- `N == 0` → no finished backlog: skip the drain (step 2), but still do steps 3
+- `N == 0` and `U == 0` → nothing to do: skip the drain (step 2), but still do steps 3
   and 4 — the title sync puts back reverted titles even on a quiet day, and the
   run must be closed. (Today's still-live work is deliberately excluded — it gets
   picked up by a later run once the session is done.)
+- **Invoked with `conversation <id>`** (`/convo-digest:digest conversation <session id>`
+  — Mission Control's per-conversation *Summarize* button sends exactly this): the
+  person wants that one conversation summarized now, even if it is unchanged or still
+  active. Skip this count and the drain loop: launch the workflow **once** as
+  `Workflow({ name: "digest", args: {"limit": 1, "only": "<id>"} })` (it summarizes
+  just that conversation and tags nothing else), then do steps 3 and 4 as usual. A
+  `drained` result means it was too short to summarize (under the token floor) or the
+  id matched no transcript: say which in your report.
 - **Invoked with `now`** (`/convo-digest:digest now` — Mission Control's
   *Summarize now* button sends exactly this): the person wants today's
   conversations summarized as well, so never take the `N == 0` exit — go on to
   step 2 whatever `N` is. The workflow's own prep already includes today's
   conversations that have been idle for a minute; the session you are running in
   is always left out, since it is still being written.
+- `N == 0` but `U > 0` → run the drain anyway: each launch also tags up to 100 older
+  records (one cheap Haiku call per 25, from the stored summary — no transcript is
+  re-read), so the backlog drains a few launches at a time.
 - Otherwise report `N` and note this will spend tokens + take a few minutes
   (each whole-tier convo is one Haiku summarizer agent).
 
@@ -179,13 +191,13 @@ left" or "everything broke":
 
 | `status` | Meaning | Do |
 |---|---|---|
-| `progress` | records landed this batch | launch it again |
-| `drained` | nothing left to summarize | stop — the drain succeeded |
+| `progress` | records landed, or older records were tagged, this batch | launch it again |
+| `drained` | nothing left to summarize or tag | stop — the drain succeeded |
 | `failed` | there was work but nothing landed; `stage` + `error` say where | log an `issue` (kind `workflow-<stage>`, the error as detail), retry the workflow **once**; if it fails again, stop |
 
-Also log an `issue` (kind `lost-work`) whenever a result's `lost` lists summaries or
-chunks that didn't land — they retry on a later run, but the user should be able to
-see it. Stop after 10 launches even if it still says `progress`, and log that too.
+Also log an `issue` (kind `lost-work`) whenever a result's `lost` lists summaries,
+chunks or tags that didn't land — they retry on a later run, but the user should be
+able to see it. Stop after 10 launches even if it still says `progress`, and log that too.
 Each launch advances the change-detector, so successive launches pick up where the
 last stopped (checkpointed; a crash mid-drain loses nothing).
 
@@ -256,7 +268,10 @@ an unclosed run reads as "died mid-way".
 
 **Report only the workflow's own numbers.** Sum the `indexed` counts across
 batches and tell the user how many conversations were added/updated, the new index
-size, and how many app titles were renamed. Mention any **over-cap (sampler-tier)
+size, and how many app titles were renamed. Sum `tagged` too, with the last
+`tag_remaining`, and name any workstreams the runs created (`new_workstreams`) and
+merged (`merged_workstreams`) — the person keeps an eye on that list. Mention any
+**over-cap (sampler-tier)
 convos that were skipped** — those need the (deferred) horizontal sampler and are
 not yet in the index. When issues were logged, say how many, and that
 `python3 ${CLAUDE_PLUGIN_ROOT}/src/ledger.py show` lists them.
