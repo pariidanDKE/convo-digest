@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""appsessions.py — bridge digest titles into the Claude Code desktop app's own store.
+"""appsessions.py — read (and, as a fallback, write) the Claude Code desktop app's session store.
 
-The `--resume` picker and the desktop app read DIFFERENT title stores. Writing a
-`custom-title` record into the transcript (index.py) only covers the picker; the app's
-sidebar reads `title` from its per-session JSON, and re-stamps its own auto title into
-the transcript on every turn. So a transcript-only writeback is invisible in the app.
+The `--resume` picker and the desktop app read DIFFERENT title stores. The transcript's
+`custom-title` record (index.py) only covers the picker; the app's sidebar — and the
+title half of its search — read `title` from its per-session JSON. That file maps to a
+conversation via `cliSessionId` (== the transcript uuid == our record `id`).
 
-This module maps a conversation to its app session file via `cliSessionId` (== the
-transcript uuid == our record `id`) and writes the digest title there too, marking it
-`titleSource: "user"` so the app's classifier stops re-titling it.
+Writing that JSON behind the app's back is racy: the app keeps each session in memory
+and later saves its stale copy over ours (77 of 347 digest titles were reverted that
+way). So app titles now go through the app's own rename tool (see titles.py), and this
+module is mainly the READ side — titles, titleSource, and which sessions are scheduled-
+task runs. `write_title` remains as the fallback for when the rename tool isn't
+available (a CLI-only digest run).
 
 Undocumented app internals: every read is defensive and every failure is a no-op, so a
 schema change degrades to "no app titles" rather than a corrupted store.
@@ -20,13 +23,18 @@ import json
 import os
 import platform
 import tempfile
+import time
 
 # Per-session JSON lives at <root>/<install>/<workspace>/local_<sessionId>.json
 _SESSION_GLOB = os.path.join("*", "*", "local_*.json")
 
 
 def store_root() -> str | None:
-    """The app's claude-code-sessions directory for this platform, or None if absent."""
+    """The app's claude-code-sessions directory for this platform, or None if absent.
+    CONVO_DIGEST_APP_STORE overrides it (tests, unusual installs)."""
+    override = os.environ.get("CONVO_DIGEST_APP_STORE")
+    if override:
+        return override if os.path.isdir(override) else None
     system = platform.system()
     if system == "Darwin":
         base = "~/Library/Application Support/Claude"
@@ -38,27 +46,90 @@ def store_root() -> str | None:
     return root if os.path.isdir(root) else None
 
 
-def load_map() -> dict[str, list[str]]:
-    """Map cliSessionId -> session-file paths. A list because a forked session can
-    carry the same cliSessionId; we title every copy so the sidebar stays consistent."""
+def iter_sessions(modified_within: float | None = None):
+    """Yield (path, session_dict) for every readable app session file. With
+    `modified_within` (seconds), only files touched that recently — a cheap way to find
+    the session that is starting right now without parsing the whole store."""
     root = store_root()
     if not root:
-        return {}
-    out: dict[str, list[str]] = {}
+        return
+    cutoff = time.time() - modified_within if modified_within else None
     for path in glob.glob(os.path.join(root, _SESSION_GLOB)):
         try:
+            if cutoff is not None and os.path.getmtime(path) < cutoff:
+                continue
             with open(path, encoding="utf-8") as fh:
-                cli = json.load(fh).get("cliSessionId")
+                session = json.load(fh)
         except (OSError, ValueError):
             continue
+        if isinstance(session, dict):
+            yield path, session
+
+
+def load_sessions() -> dict[str, list[tuple[str, dict]]]:
+    """Map cliSessionId -> [(path, session_dict)]. A list because a forked session can
+    carry the same cliSessionId."""
+    out: dict[str, list[tuple[str, dict]]] = {}
+    for path, session in iter_sessions():
+        cli = session.get("cliSessionId")
         if cli:
-            out.setdefault(cli, []).append(path)
+            out.setdefault(cli, []).append((path, session))
     return out
 
 
+def load_map() -> dict[str, list[str]]:
+    """Map cliSessionId -> session-file paths (see load_sessions)."""
+    return {cli: [p for p, _ in items] for cli, items in load_sessions().items()}
+
+
+def is_scheduled(session: dict) -> bool:
+    """Whether an app session is a scheduled-task run (nightly digest, standup brief, …).
+    Those are kept out of the index and are never renamed."""
+    return bool(session.get("scheduledTaskId"))
+
+
+def scheduled_cli_ids(sessions: dict[str, list[tuple[str, dict]]] | None = None) -> set[str]:
+    """cliSessionIds of every scheduled-task session in the store."""
+    sessions = load_sessions() if sessions is None else sessions
+    return {cli for cli, items in sessions.items()
+            if any(is_scheduled(s) for _, s in items)}
+
+
+def current_scheduled_task() -> str | None:
+    """The scheduled task behind the session THIS process runs in, or None. The desktop
+    app tells its CLI which app session it belongs to (CLAUDE_CODE_HOST_SESSION_ID, the
+    `local_…` id that names the session file), and that file carries scheduledTaskId.
+    The app writes the file a little after the session starts, so this finds nothing
+    during SessionStart (the hook checks CLAUDE_CODE_HOST_SCHEDULED_RUN first)."""
+    host = os.environ.get("CLAUDE_CODE_HOST_SESSION_ID", "")
+    root = store_root()
+    if not (host.startswith("local_") and root):
+        return None
+    for path in glob.glob(os.path.join(root, "*", "*", f"{host}.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                session = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(session, dict) and is_scheduled(session):
+            return session["scheduledTaskId"]
+    return None
+
+
+def scheduled_task_for(cli_session_id: str, modified_within: float | None = None) -> str | None:
+    """The scheduled task id behind this conversation, or None when it isn't a
+    scheduled run (or has no app session at all)."""
+    if not cli_session_id:
+        return None
+    for _, session in iter_sessions(modified_within):
+        if session.get("cliSessionId") == cli_session_id and is_scheduled(session):
+            return session["scheduledTaskId"]
+    return None
+
+
 def _write_one(path: str, title: str, prev_written: str | None) -> str | None:
-    """Set `title` on one session file. Returns the title written, "current" if it
-    already matched, or None when skipped/failed.
+    """FALLBACK file write (see module doc): set `title` on one session file. Returns the
+    title written, "current" if it already matched, or None when skipped/failed.
 
     FILL-OR-OURS, adapted: `titleSource: "auto"` (Claude Code's own generated title) is
     ours to replace — that is the point of the feature. A `"user"` title is only

@@ -236,9 +236,14 @@ def _load_json(path: str) -> dict:
 
 
 def _dump_json(path: str, obj: object) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
+    """Write JSON atomically (temp file + rename): a run killed mid-write — the machine
+    sleeping, a revoked login — must never leave a half-written index behind."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(obj, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
 
 def _resolve_write_titles(override: bool | None) -> bool:
@@ -309,12 +314,14 @@ def _merge_items(items: list, index: dict, index_path: str,
     re-digest would silently un-archive a convo.
 
     When `write_titles`, also write the digest title back to the conversation's own CC
-    transcript as a `custom-title` (fill-or-ours; see _write_session_title) and to the
-    desktop app's session store (see appsessions). We track what we wrote in
-    provenance.title_written / app_title_written so a later re-digest recognises its own
-    title as safe to refresh (vs a foreign one to leave alone). Returns (written, failed)."""
+    transcript as a `custom-title` (fill-or-ours; see _write_session_title) — that is
+    what the `claude --resume` picker shows. We track what we wrote in
+    provenance.title_written so a later re-digest recognises its own title as safe to
+    refresh (vs a foreign one to leave alone). The desktop app's titles are NOT written
+    here: they go through the app's own rename tool after the merge (titles.py), because
+    a direct write to its session store gets overwritten by the app. Returns
+    (written, failed)."""
     written, failed = 0, []
-    session_map = APP.load_map() if write_titles else {}
     for it in items:
         try:
             with open(it["work_path"], encoding="utf-8") as fh:
@@ -331,9 +338,11 @@ def _merge_items(items: list, index: dict, index_path: str,
                 wrote = _write_session_title(rec.get("source"), rec.get("id"), title, prev)
                 if wrote:
                     rec["provenance"]["title_written"] = wrote
-                app_prev = (old or {}).get("provenance", {}).get("app_title_written")
-                if APP.write_title(rec.get("id"), title, app_prev, session_map):
-                    rec["provenance"]["app_title_written"] = title
+            # Carry the app-title bookkeeping forward: titles.py uses it to recognise a
+            # title in the app store as one we put there.
+            app_prev = (old or {}).get("provenance", {}).get("app_title_written")
+            if app_prev:
+                rec["provenance"]["app_title_written"] = app_prev
             index[it["key"]] = rec
             _dump_json(index_path, index)         # persist per-record (crash-safe)
             written += 1
@@ -367,7 +376,8 @@ def run_batch(batch_path: str, index_path: str, *,
 
 def run_batch_glob(patterns, index_path: str, *,
                    model: str = "haiku-4-5", cleanup: bool = False,
-                   write_titles: bool | None = None) -> dict:
+                   write_titles: bool | None = None,
+                   result_file: str | None = None) -> dict:
     """Merge MANY small batch files (each a JSON array — or a lone object — of
     {key, work_path, summary}) into the index in one deterministic pass.
 
@@ -385,6 +395,10 @@ def run_batch_glob(patterns, index_path: str, *,
     correct when the chunk-writer agents don't share one cwd: a lone relative glob run
     by the merge process only sees files in ITS cwd, silently orphaning chunks written
     elsewhere. `write_titles=None` reads the persisted opt-in.
+
+    `result_file` makes a retry safe: the merge result is saved there BEFORE the chunks
+    are cleaned up, and a later call that finds no chunks but a saved result replays it
+    (`"replayed": true`) instead of reporting `written: 0` for work that did land.
     """
     counter = TK.default_counter()
     repos = R.load_repos()
@@ -395,6 +409,10 @@ def run_batch_glob(patterns, index_path: str, *,
     # relative fallback glob ('_digest_batch_0.json') and its absolute path, which are
     # different strings for one file — reading it twice would double-count `written`.
     files = sorted({os.path.realpath(f) for pat in patterns for f in glob.glob(pat)})
+    if not files and result_file and os.path.exists(result_file):
+        saved = _load_json(result_file)
+        if saved:
+            return {**saved, "replayed": True}
     items, failed = [], []
     for f in files:
         try:
@@ -407,14 +425,50 @@ def run_batch_glob(patterns, index_path: str, *,
     written, item_failed = _merge_items(items, index, index_path,
                                         counter=counter, repos=repos, model=model, write_titles=wt)
     failed.extend(item_failed)
+    result = {"written": written, "failed": failed, "index_size": len(index),
+              "files": len(files)}
+    if result_file:
+        _dump_json(result_file, result)
     if cleanup:
         for f in files:
             try:
                 os.remove(f)
             except OSError:
                 pass
-    return {"written": written, "failed": failed, "index_size": len(index),
-            "files": len(files)}
+    return result
+
+
+def stage_chunk(path: str, text: str) -> dict:
+    """Validate one chunk of summarizer records and write it atomically to `path`, for
+    a later `--batch-glob` merge. The workflow's chunk agents pipe the records in on
+    stdin (a quoted heredoc) instead of using the Write tool, which can stall forever on
+    a permission prompt in an unattended run (#14). Validating here means a mangled
+    chunk fails loudly at write time, where the agent can still retry it."""
+    data = json.loads(text)
+    items = data if isinstance(data, list) else [data]
+    for it in items:
+        if not (isinstance(it, dict) and it.get("key") and it.get("work_path")
+                and isinstance(it.get("summary"), dict)):
+            raise ValueError("each element needs key, work_path and a summary object")
+    _dump_json(path, items)
+    return {"path": os.path.abspath(path), "count": len(items)}
+
+
+def drop_scheduled(index_path: str) -> dict:
+    """Remove the records of scheduled-task runs (the nightly digest itself, standup
+    briefs, …) from the index, after a timestamped backup. prepare.py keeps them out
+    from then on; this clears the ones indexed before that rule existed."""
+    index = _load_json(index_path)
+    scheduled = APP.scheduled_cli_ids()
+    drop = [k for k, rec in index.items() if rec.get("id") in scheduled]
+    backup = None
+    if drop:
+        backup = f"{index_path}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        _dump_json(backup, index)
+        for k in drop:
+            del index[k]
+        _dump_json(index_path, index)
+    return {"dropped": len(drop), "index_size": len(index), "backup": backup}
 
 
 def backfill_titles(index_path: str) -> dict:
@@ -423,57 +477,36 @@ def backfill_titles(index_path: str) -> dict:
     that re-enter _merge_items), so history indexed before the title feature — or before
     a late opt-in — would otherwise never get a title. This one-shot pass covers them.
 
-    Covers both title stores — the transcript `custom-title` (the --resume picker) and
-    the desktop app's session JSON (the sidebar). The two are counted separately because
-    a convo commonly qualifies for one and not the other: the app re-stamps its own auto
-    title into every transcript, which the transcript writer must leave alone, while that
-    same auto title IS ours to replace in the app store.
+    Transcript store only (the `claude --resume` picker). The desktop app's titles are
+    re-checked for every indexed convo on each digest run by titles.py, so they need no
+    backfill.
 
     Same fill-or-ours policy and provenance tracking as the inline writer, so it's
     idempotent and never clobbers a foreign (human) title. Explicit command: it does NOT
     gate on the write_titles opt-in (running it is the consent) and does not modify
     config. Returns counts: titled (newly written), current (already ours), skipped
-    (foreign title, or missing transcript/title), and the app_* equivalents."""
+    (foreign title, or missing transcript/title)."""
     index = _load_json(index_path)
-    session_map = APP.load_map()
     titled, current, skipped = 0, 0, 0
-    app_titled, app_current, app_skipped = 0, 0, 0
     for rec in index.values():
         src, sid = rec.get("source"), rec.get("id")
         title = (rec.get("summary") or {}).get("title")
-        if not (title and sid):
+        if not (title and sid and src and os.path.exists(src)):
             skipped += 1
-            app_skipped += 1
             continue
-
-        if not (src and os.path.exists(src)):
+        prev = rec.get("provenance", {}).get("title_written")
+        before = _read_last_custom_title(src)
+        wrote = _write_session_title(src, sid, title, prev)
+        if wrote is None:                   # foreign title present — left untouched
             skipped += 1
-        else:
-            prev = rec.get("provenance", {}).get("title_written")
-            before = _read_last_custom_title(src)
-            wrote = _write_session_title(src, sid, title, prev)
-            if wrote is None:               # foreign title present — left untouched
-                skipped += 1
-            elif before == title:           # already current — no append happened
-                current += 1
-            else:                           # newly written (or refreshed our own)
-                rec.setdefault("provenance", {})["title_written"] = wrote
-                titled += 1
-
-        app_prev = rec.get("provenance", {}).get("app_title_written")
-        app_wrote = APP.write_title(sid, title, app_prev, session_map)
-        if app_wrote is None:               # no app session, or a name the user chose
-            app_skipped += 1
-        else:
-            rec.setdefault("provenance", {})["app_title_written"] = title
-            if app_wrote == "current":
-                app_current += 1
-            else:
-                app_titled += 1
+        elif before == title:               # already current — no append happened
+            current += 1
+        else:                               # newly written (or refreshed our own)
+            rec.setdefault("provenance", {})["title_written"] = wrote
+            titled += 1
     _dump_json(index_path, index)
     return {"titled": titled, "current": current, "skipped": skipped,
-            "app_titled": app_titled, "app_current": app_current,
-            "app_skipped": app_skipped, "index_size": len(index)}
+            "index_size": len(index)}
 
 
 def main() -> int:
@@ -490,6 +523,15 @@ def main() -> int:
     ap.add_argument("--index", help="index store to merge into (batch mode)")
     ap.add_argument("--cleanup", action="store_true",
                     help="unlink the consumed batch file(s) after merging (keeps cwd clean)")
+    ap.add_argument("--result-file",
+                    help="with --batch-glob: save the merge result here before cleanup, and "
+                         "replay it if called again with no chunks left (safe retry)")
+    ap.add_argument("--stage-chunk", metavar="PATH",
+                    help="read a JSON array of {key, work_path, summary} from stdin, "
+                         "validate it, and write it atomically to PATH for a later merge")
+    ap.add_argument("--drop-scheduled", action="store_true",
+                    help="remove scheduled-task runs from the index (backs it up first); "
+                         "needs --index")
     ap.add_argument("--model", default="haiku-4-5")
     ap.add_argument("--summarized-at", help="ISO ts (override for reproducible output)")
     ap.add_argument("--write-titles", dest="write_titles", action="store_true", default=None,
@@ -553,6 +595,20 @@ def main() -> int:
         print(json.dumps({"dismiss_nudge": args.dismiss_nudge}))
         return 0
 
+    if args.stage_chunk:
+        try:
+            print(json.dumps(stage_chunk(args.stage_chunk, sys.stdin.read())))
+        except ValueError as e:
+            print(json.dumps({"count": 0, "error": f"invalid chunk: {e}"}))
+            return 1
+        return 0
+
+    if args.drop_scheduled:
+        if not args.index:
+            ap.error("--drop-scheduled requires --index")
+        print(json.dumps(drop_scheduled(args.index)))
+        return 0
+
     if args.backfill_titles:
         if not args.index:
             ap.error("--backfill-titles requires --index")
@@ -563,7 +619,8 @@ def main() -> int:
         if not args.index:
             ap.error("--batch-glob requires --index")
         print(json.dumps(run_batch_glob(args.batch_glob, args.index, model=args.model,
-                                        cleanup=args.cleanup, write_titles=args.write_titles)))
+                                        cleanup=args.cleanup, write_titles=args.write_titles,
+                                        result_file=args.result_file)))
         return 0
 
     if args.batch:

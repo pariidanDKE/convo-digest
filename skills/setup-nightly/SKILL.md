@@ -19,7 +19,7 @@ scheduler**.
 | Runs | launchd/systemd/cron/Task Scheduler, headless `claude -p` | Inside the Claude Desktop app, as a normal session |
 | Fires when app closed | **Yes** (macOS/systemd catch up on wake) | No — only while the app is open |
 | Needs the Desktop app | No — works CLI-only, headless, servers | Yes |
-| Traces | `~/.claude/digest/nightly.log` | Run history in the app's sidebar |
+| Traces | `ledger.py show` + `~/.claude/digest/nightly.log` | `ledger.py show` + run history in the app's sidebar |
 | Auth | subscription, `ANTHROPIC_API_KEY` unset; the OS job runs on the Agent SDK pool | the app's live login; draws interactive subscription usage like any session |
 | Plugin version | whatever is cached on disk | always the app's current version |
 
@@ -29,10 +29,14 @@ auth → Desktop task.** Neither bills against Anthropic API credits — both ar
 on-subscription — but the Desktop task's usage lands on the interactive pool, so
 mention that if the user watches daily limits.
 
-Then pick a time: **03:13 local is the default** and usually right. If their machine
-is normally asleep at night, say so plainly — an OS job that is off at 03:13 catches
-up on wake (macOS/systemd; plain cron does not), a Desktop task simply misses unless
-the app is open — and offer a time they are typically at the keyboard.
+Then pick a time **when the machine is reliably awake**. For the OS scheduler, **03:13
+local is the default** — if the machine is off then, macOS/systemd catch up on wake
+(plain cron does not). For a **Desktop task, default to a morning time the user is
+usually at the keyboard** (e.g. 09:20): a Desktop task fires only while the app is
+open, and a run that starts while the laptop is going to sleep — or catches up just
+after it wakes, with a stale login — is where almost every failed night came from. A
+run that starts on time takes a few minutes. Ask; offer the night slot only if the
+machine really stays on.
 
 ## 2. Install
 
@@ -56,18 +60,28 @@ project settings — the unattended run cannot approve prompts, so a missing all
 silently blocks the whole drain.
 
 ### 2b. Claude Desktop task
-The installer script **cannot** create this — the schedule is registered inside the
-app, reachable only through the `create_scheduled_task` MCP tool. Call that tool
-yourself (no clicking through the Routines UI):
+**Availability check first:** this mechanism needs the `create_scheduled_task` tool,
+which only exists in the Claude Desktop app. If it isn't in your toolset (CLI-only,
+headless, an IDE session), the Desktop task cannot be created here — say so and use the
+OS scheduler (2a) instead. Do not try to hand-write the task files; the schedule lives
+in the app's own registry, not on disk.
+
+The installer script **cannot** create this either — the schedule is registered inside
+the app, reachable only through `create_scheduled_task`. Call that tool yourself (no
+clicking through the Routines UI):
 
 - `taskId`: `convo-digest-nightly`
-- `cronExpression`: the chosen time as `MM HH * * *` (e.g. `13 3 * * *` for 03:13)
+- `cronExpression`: the chosen time as `MM HH * * *` (e.g. `20 9 * * *` for 09:20)
 - `description`: `Nightly convo-digest recall-index refresh`
 - `prompt`: a self-contained drain instruction — the run starts fresh with no memory
   of this conversation:
   > Refresh the conversation recall index now by invoking the `/convo-digest:digest`
-  > skill: drain all batches until nothing changed remains, then stop. This is
-  > unattended — do not ask questions; if a preference is unset, leave it and continue.
+  > skill and follow it to the end: start the run record, drain until the workflow
+  > reports `drained`, sync the app titles, close the run record. This is an
+  > unattended run — follow the skill's "Unattended runs" rules: do not ask questions,
+  > do not act on setup nudges, change nothing outside the pipeline, retry a failed
+  > step at most once, and log every problem with `ledger.py issue`. Finish with a
+  > one-line summary: conversations indexed, titles renamed, index size, issues logged.
 
 After creating it, tell the user to open the task in the sidebar and click **Run
 now** once, approving each tool ("always allow") so future unattended runs don't
@@ -107,7 +121,8 @@ log}` and detects **both** mechanisms — a Desktop task shows as `installed: tr
 
 For the OS scheduler, prove it runs with `install_schedule.py --start` and watch
 `~/.claude/digest/nightly.log`. For a Desktop task, use the app's **Run now** button
-(there is no `--start` for it — the app owns it).
+(there is no `--start` for it — the app owns it). Either way, the run then shows up in
+`python3 ${CLAUDE_PLUGIN_ROOT}/src/ledger.py show`, with any issues it logged.
 
 ## Removing it
 - **OS scheduler:**
@@ -130,6 +145,7 @@ the automation has gone missing.
 - Scheduled and manual digests share the change-detector, so whichever runs first
   does the work and the other no-ops. Running `/convo-digest:digest` by hand after
   setting this up is always safe.
-- The hook keeps one health check: if the backlog grows past 25 while `nightly` is
-  `true`, or the OS job disappears, it tells the user the automation is failing
+- The hook keeps a health check: if the last run in the ledger failed or never
+  finished, no run has succeeded in 36 hours, the backlog grows past 25 (OS
+  scheduler), or the job disappears, it tells the user the automation is failing
   instead of silently going quiet.
