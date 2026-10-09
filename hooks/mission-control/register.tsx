@@ -14,7 +14,7 @@
 // Data comes from src/mission_control.py (read-only over the transcripts, the digest
 // index, the app's session files and the digest run ledger).
 import { atom, read, update } from 'claude-code'
-import type { Elements, EngineInterface, Register } from 'claude-code'
+import type { Elements, EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type {
   McAsk,
@@ -484,6 +484,15 @@ async function summarizeNow($: $T): Promise<void> {
     await update($, summarizingAtom, () => null)
     $.ui.toast(`Couldn't start the digest: ${errText(err)}`)
   })
+}
+
+/** Whether a drawn tree shows nothing: what the band's chain gives back when no other
+ *  plugin draws there. */
+function drawsNothing(el: RenderElement | null | undefined): boolean {
+  if (!el) return true
+  if (el.type !== 'Box' && el.type !== 'Text') return false
+  return (el.children ?? []).every(k =>
+    typeof k === 'string' ? k.trim() === '' : drawsNothing(k as RenderElement))
 }
 
 // ------------------------------------------------------------------ home session
@@ -1003,7 +1012,10 @@ export const register: Register = on => {
     const here = snap?.sessions.find(s => s.id === selfId)
     const busy = await read($, resummarizingAtom)
     const thisChat = { id: selfId, title: here?.title ?? 'this chat', digested: here?.digested ?? false }
-    return (
+    // other plugins draw here too: ours on top, theirs (what the rest of the chain draws)
+    // beneath, so installing this never hides another mod's band
+    const rest = await next(e)
+    const ours = (
       <Box flexDirection="row" gap={2}>
         {elsewhere
           ? <Button key="band-open" label="◉ Mission Control ↗" plain onPress={() => { void goHome($) }} />
@@ -1016,6 +1028,7 @@ export const register: Register = on => {
           : null}
       </Box>
     )
+    return drawsNothing(rest) ? ours : <Box flexDirection="column">{ours}{rest}</Box>
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

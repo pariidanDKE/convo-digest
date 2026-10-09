@@ -400,6 +400,22 @@ describe('mission control', () => {
     expect(calls.status[calls.status.length - 1]).toMatch(/^◉ MC · .*✗ · 2 digest issue\(s\)$/)
   })
 
+  test('the band shares the space above the prompt with another plugin band', async ($, on) => {
+    // another plugin, further down the chain, draws a band of its own (registered ahead
+    // of the test world's empty bottom, so it answers first)
+    on('ui.render', { component: 'AbovePrompt' }, async ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return <Text>{'other band'}</Text>
+    })
+    world(on)
+    await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
+    const band = await $.ui.mount({ plugin: 'convo-digest', surface: 'desktop', component: 'AbovePrompt',
+      props: { hasSurvey: false } as never })
+    expect(await band.find({ key: 'band-open' })).toBeDefined()
+    expect(await band.find({ text: /other band/ })).toBeDefined()
+    await band.unmount()
+  })
+
   test('the band summarizes the chat it sits in, on request', async ($, on) => {
     const calls = world(on)
     await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
