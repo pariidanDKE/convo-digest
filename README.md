@@ -122,6 +122,26 @@ Know the app search's limits: it matches titles only across your **50 most recen
 active** sessions, and its text search scans message content (not titles) across
 roughly the 200 most recent. For anything older, use `/convo-digest:recall`.
 
+## Mission Control
+
+A pane over the same index: type `/mission`, or click the **◉ Mission Control** band
+above the prompt.
+
+- **The day's standup brief** up top, folded to its first bullets.
+- **An Ask bar** that answers from your summaries and links the conversations it cites.
+- **A timeline** of your conversations, grouped by workstream, project, status, kind of
+  work or day. Filter it by workstream and kind; pick today, yesterday, the last 7 days
+  or your own dates.
+- **Per conversation:** its gist, a read-only reader with the messages, and buttons to
+  open it, summarize it again, move it to another project, pin it to the sidebar or
+  archive it.
+- **Your routines and the digest's health** at the bottom.
+
+`/mission home` makes the chat you type it in Mission Control's home: it opens the pane
+by itself, and the band in every other chat takes you there. On macOS,
+`tools/raise/build.sh` builds a small helper app that brings that chat's own window to
+the front (it needs Accessibility permission); without it the band says so.
+
 ## The flow
 
 ```mermaid
