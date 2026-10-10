@@ -14,7 +14,7 @@
 // Data comes from src/mission_control.py (read-only over the transcripts, the digest
 // index, the app's session files and the digest run ledger).
 import { atom, read, update } from 'claude-code'
-import type { Elements, EngineInterface, Register, RenderElement } from 'claude-code'
+import type { Elements, EngineInterface, Register, RenderElement, RenderInput } from 'claude-code'
 
 import type {
   McAsk,
@@ -81,6 +81,8 @@ const DIGEST = { command: 'convo-digest:digest', args: 'now' } as const
 const SESSION_ACTION = 'convo-digest:session'       // this plugin's skill: the app's archive and pin tools
 
 type $T = EngineInterface
+/** What the Pane render hook receives. */
+type PaneRender = RenderInput<'Pane'>
 type El = Pick<Elements['desktop'], 'Box' | 'Text' | 'Button' | 'Select' | 'Input' | 'Markdown' | 'Client'>
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err))
@@ -877,10 +879,292 @@ function Health(el: El, snap: McSnapshot, now: number) {
   )
 }
 
+/** The pane, drawn; `selfId` is the session it is drawn in. */
+async function drawPane($: $T, e: PaneRender, selfId: string) {
+  const snap = await read($, snapAtom)
+  const view = await read($, viewAtom)
+  const selected = await read($, selectedAtom)
+  const ask = await read($, askAtom)
+  const status = await read($, statusAtom)
+  const standupOpen = await read($, standupOpenAtom)
+  const summarizing = await read($, summarizingAtom)
+  const collapsed = await read($, collapsedAtom)
+  const reader = await read($, readerAtom)
+  const busyOne = await read($, resummarizingAtom)
+  const now = await $.clock.now()
+  // wide enough to read a conversation beside the timeline; else it takes the pane
+  const wide = e.surface === 'desktop' && e.props.bodyColumns >= WIDE
+
+  if (e.surface === 'mobile' || e.surface === 'vscode') {
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text bold>{TITLE}</Text>
+        {(snap?.sessions ?? []).filter(s => !s.scheduled).slice(-20).map(s => (
+          <Text wrap="truncate-end">{`${hm(s.first, snap?.tzOffsetMin ?? 0)} ${s.project} · ${s.title}`}</Text>
+        ))}
+      </Box>
+    )
+  }
+
+  const el = $.ui.resolve(e) as unknown as El
+  const { Box, Text, Button, Select, Client } = el
+
+  if (!snap) {
+    return (
+      <Box flexDirection="column">
+        <Text bold>{TITLE}</Text>
+        {status.error
+          ? <Text color="#f85149" wrap="wrap">{`Couldn't collect the data: ${status.error}`}</Text>
+          : <Text dimColor>Collecting your conversations…</Text>}
+        <Button key="refresh" label="Retry" onPress={() => { void refresh($) }} />
+      </Box>
+    )
+  }
+
+  const tz = snap.tzOffsetMin
+  const pending = unsummarized(snap, selfId)
+  const t = timeline(snap, view, now)
+  const shown = inView(snap, view)
+  const filtered = Boolean(view.ws || view.kind)
+  // the filters' choices: what this range holds, most time first, and the current pick
+  const tally = (key: (s: McSession) => string | null) => {
+    const m = new Map<string, number>()
+    for (const s of snap.sessions) {
+      const k = s.scheduled ? null : key(s)
+      if (k) m.set(k, (m.get(k) ?? 0) + s.activeMin)
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k)
+  }
+  const wsChoices = tally(s => s.workstream)
+  if (view.ws && !wsChoices.includes(view.ws)) wsChoices.push(view.ws)
+  const kindChoices = tally(s => s.kind)
+  if (view.kind && !kindChoices.includes(view.kind)) kindChoices.push(view.kind)
+  const sel = selected ? snap.sessions.find(s => s.id === selected) ?? null : null
+  const multiDay = snap.range.days.length > 1
+  const rows = rowsOptions(multiDay)
+  const pickDays = Array.from({ length: CUSTOM_DAYS }, (_, i) => dayAt(now, tz, i))
+  // older days come from `/mission YYYY-MM-DD..YYYY-MM-DD`: keep those picked
+  const pickWith = (v: string | undefined) => v && !pickDays.some(d => d.value === v)
+    ? [...pickDays, { value: v, label: v }] : pickDays
+  // axis + rows + a blank line before each heading but the first + blank + footer
+  // the terminal timeline's rows: axis, headings (a blank line before all but the
+  // first), the conversations of unfolded groups, then a blank line and the footer
+  let foldedNow = false
+  const visible = t.rows.filter(r => {
+    if (r.kind === 'header') {
+      foldedNow = collapsed.includes(r.label)
+      return true
+    }
+    return !foldedNow
+  }).length
+  const height = 1 + visible + t.rows.filter((r, i) => r.kind === 'header' && i > 0).length + 2
+  const groups = t.rows.filter(r => r.kind === 'header').map(r => r.label)
+  const allFolded = groups.length > 0 && groups.every(g => collapsed.includes(g))
+  const tl = { collapsed, rows: t.rows, hourFrom: t.hourFrom, hourTo: t.hourTo, ticks: t.ticks, now: t.now,
+    nowBase: t.nowBase, selected, order: t.order }
+  const readSession = reader ? snap.sessions.find(s => s.id === reader.id) ?? null : null
+
+  if (reader && !wide) {
+    // a narrow pane: the conversation takes it over, the way back on top
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="row" justifyContent="space-between">
+          <Button key="reader-back" label={`← ${TITLE} · ${snap.range.label}`} plain
+            onPress={() => { void closeReader($) }} />
+          <Text dimColor>{reader.loading ? 'reading…' : `updated ${hm(now, tz)}`}</Text>
+        </Box>
+        {Reader(el, $, reader, readSession, snap, now, selfId, busyOne)}
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Box flexDirection="column">
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold>{`${TITLE} · ${snap.range.label}`}</Text>
+          <Box flexDirection="row" gap={1}>
+            <Text dimColor>{status.loading ? 'refreshing…' : `updated ${hm(snap.generatedAt, tz)}`}</Text>
+            <Button key="refresh" label="Refresh" hotkey="r" plain onPress={() => { void refresh($) }} />
+          </Box>
+        </Box>
+        <Box flexDirection="row" gap={2} alignItems="center" flexWrap="wrap">
+          <Text dimColor wrap="wrap">
+            {`${snap.totals.conversations} conversations · ${duration(snap.totals.activeMin)} active · ` +
+              `${snap.totals.projects} project${snap.totals.projects === 1 ? '' : 's'}`}
+          </Text>
+          {pending.length || summarizing
+            ? <Button key="summarize" plain variant="primary"
+                label={summarizing ? 'Summarizing… (follow it in the conversation)'
+                  : `Summarize ${pending.length} now`}
+                onPress={() => { void summarizeNow($) }} />
+            : <Text dimColor>· everything is summarized</Text>}
+        </Box>
+        {status.error ? <Text color="#f85149" wrap="wrap">{`Last refresh failed: ${status.error}`}</Text> : null}
+      </Box>
+
+      {Standup(el, $, snap, now, standupOpen)}
+
+      {Ask(el, $, ask, snap, view, e.surface)}
+
+      <Box flexDirection="row" gap={2} flexWrap="wrap">
+        <Select key="range" value={view.range}
+          options={[{ value: 'today', label: 'Today' }, { value: 'yesterday', label: 'Yesterday' },
+            { value: '7d', label: 'Last 7 days' }, { value: 'custom', label: 'Custom range…' }]}
+          onSelect={v => {
+            // a first custom range starts as the last two weeks
+            void setView($, v === 'custom' && !view.from
+              ? { range: 'custom', from: pickDays[13]!.value, to: pickDays[0]!.value }
+              : { range: v as McRangeKey })
+          }} />
+        {view.range === 'custom'
+          ? (
+            <Box key="custom-range" flexDirection="row" gap={1} alignItems="center">
+              <Text dimColor>From</Text>
+              <Select key="from" value={view.from ?? pickDays[13]!.value} options={pickWith(view.from)}
+                onSelect={v => { void setView($, { from: v }) }} />
+              <Text dimColor>to</Text>
+              <Select key="to" value={view.to ?? pickDays[0]!.value} options={pickWith(view.to)}
+                onSelect={v => { void setView($, { to: v }) }} />
+            </Box>
+          )
+          : null}
+        <Select key="rows" value={rows.some(r => r.value === view.rows) ? view.rows : 'project'}
+          options={rows} onSelect={v => { void setView($, { rows: v as McRowsMode }) }} />
+        {t.rows.some(r => r.kind === 'header')
+          ? <Button key="fold-all" plain dimColor label={allFolded ? '▾ Unfold all' : '▸ Fold all'}
+              onPress={() => { void update($, collapsedAtom, () => (allFolded ? [] : groups)) }} />
+          : null}
+        <Select key="filter-ws" value={view.ws ?? '*'}
+          options={[{ value: '*', label: 'All workstreams' }, ...wsChoices.slice(0, 60).map(n => ({ value: n, label: n }))]}
+          onSelect={v => { void setView($, { ws: v === '*' ? undefined : v }) }} />
+        <Select key="filter-kind" value={view.kind ?? '*'}
+          options={[{ value: '*', label: 'All kinds of work' }, ...kindChoices.map(k => ({ value: k, label: k }))]}
+          onSelect={v => { void setView($, { kind: v === '*' ? undefined : v as McKind }) }} />
+        {filtered
+          ? <Button key="filter-clear" label="Clear filters" plain dimColor
+              onPress={() => { void setView($, { ws: undefined, kind: undefined }) }} />
+          : null}
+        <Select key="color" value={view.color}
+          options={[{ value: 'project', label: 'Colour: project' }, { value: 'status', label: 'Colour: digest status' }]}
+          onSelect={v => { void setView($, { color: v as McColorMode }) }} />
+      </Box>
+
+      <Box flexDirection="row" gap={2} alignItems="flex-start">
+      <Box flexDirection="column" width={wide && reader ? '45%' : '100%'} flexShrink={0}>
+        <Text bold>Timeline</Text>
+        {t.hidden
+          ? <Text dimColor wrap="wrap">{`Drawing the ${shown.length - t.hidden} conversations with the most time; ` +
+              `${t.hidden} more in this view. Pick a workstream or a kind of work to see them.`}</Text>
+          : null}
+        {filtered
+          ? <Text dimColor>{`Showing ${shown.length} of ${snap.totals.conversations} conversations · ` +
+              `${duration(workedMinutes(shown))} active` +
+              `${view.ws ? ` · ${view.ws}` : ''}${view.kind ? ` · ${view.kind}` : ''}`}</Text>
+          : null}
+        {e.surface === 'desktop'
+          ? (() => {
+            // the desktop draws vectors: each row is a clickable name beside its own
+            // small strip of bars, so the rows line up and a click opens the session
+            const { Svg } = $.ui.resolve(e)
+            // beside the reader the timeline has a bit under half the pane
+            const cols = wide && reader ? Math.floor(e.props.bodyColumns * 0.45) : e.props.bodyColumns
+            // the title matters more than the hours: it gets most of the row, whole
+            const labelCells = Math.max(30, Math.min(110, Math.floor(cols * 0.6)))
+            const stripPx = Math.max(160, (cols - labelCells - 2) * PX_PER_CELL)
+            const strips = timelineStrips(tl, stripPx)
+            return (
+              <Box flexDirection="column">
+                <Box flexDirection="row">
+                  <Box width={labelCells} />
+                  <Box flexGrow={1}><Svg source={strips.axis} alt="Hours" /></Box>
+                </Box>
+                {t.rows.map((r, i) => {
+                  if (r.kind === 'header') {
+                    const isFolded = collapsed.includes(r.label)
+                    return (
+                      <Box key={`h-${i}`} flexDirection="column" marginTop={i ? 1 : 0}>
+                        <Box flexDirection="row" alignItems="center">
+                          <Box width={labelCells} flexDirection="row" overflow="hidden">
+                            <Button key={`fold-${i}`} plain label={`${isFolded ? '▸' : '▾'} ${r.label}`}
+                              onPress={() => { void toggleGroup($, r.label) }} />
+                          </Box>
+                          {isFolded && strips.rows[i]
+                            ? <Box flexGrow={1}><Svg source={strips.rows[i] as string} alt={`${r.label}, all conversations`} /></Box>
+                            : null}
+                        </Box>
+                        <Text dimColor wrap="truncate-end">{`  ${r.sub}`}</Text>
+                        {r.note && !isFolded ? <Text dimColor italic wrap="truncate-end">{`  ${r.note}`}</Text> : null}
+                      </Box>
+                    )
+                  }
+                  // a folded group hides its conversations
+                  const heading = [...t.rows.slice(0, i)].reverse().find(x => x.kind === 'header')
+                  if (heading && collapsed.includes(heading.label)) return null
+                  const dot = r.bars[0]?.color ?? '#8b949e'
+                  const isSel = r.id !== null && r.id === selected
+                  const convo = r.id
+                  const session = isSel ? snap.sessions.find(x => x.id === r.id) ?? null : null
+                  return (
+                    <Box key={`r-${i}`} flexDirection="column">
+                    <Box flexDirection="row" alignItems="center">
+                      <Box width={labelCells} flexDirection="row" overflow="hidden">
+                        {convo
+                          ? (
+                            <Box flexGrow={1} flexShrink={1} flexDirection="row">
+                              <Text color={dot}>{isSel ? '▸ ' : '● '}</Text>
+                              <Button key={`go-${convo}`} plain label={r.label}
+                                onPress={() => {
+                                  // wide: read it beside the timeline; narrow: its gist under the row
+                                  void (wide ? openReader($, convo, true)
+                                    : update($, selectedAtom, cur => (cur === convo ? null : convo)))
+                                }} />
+                            </Box>
+                          )
+                          : <Box flexGrow={1} flexShrink={1} overflow="hidden"><Text bold wrap="truncate-end">{r.label}</Text></Box>}
+                        <Box width={6} justifyContent="flex-end"><Text dimColor>{r.sub}</Text></Box>
+                      </Box>
+                      <Box flexGrow={1}><Svg source={strips.rows[i] ?? ''} alt={r.label} /></Box>
+                    </Box>
+                    {session && !wide ? Expanded(el, $, session, snap, now, dot, selfId, busyOne) : null}
+                    </Box>
+                  )
+                })}
+                <Text dimColor>{wide ? 'Click a conversation to read it here.'
+                  : 'Click a conversation to see what it was about, then read it or open it.'}</Text>
+              </Box>
+            )
+          })()
+          : <Client key="timeline" module="./timeline.tsx" props={tl} width="100%" height={height} />}
+        <Box flexDirection="row" gap={2} flexWrap="wrap">
+          {t.legend.map((l, i) => (
+            <Text><Text color={l.color}>■</Text>{` ${l.label}`}</Text>
+          ))}
+        </Box>
+      </Box>
+      {wide && reader
+        ? <Box flexGrow={1} flexShrink={1} width="55%">{Reader(el, $, reader, readSession, snap, now, selfId, busyOne)}</Box>
+        : null}
+      </Box>
+
+      {sel && e.surface !== 'desktop' ? Detail(el, $, sel, snap, now, selfId, busyOne) : null}
+
+      <Box flexDirection="column">
+        <Text bold>Routines</Text>
+        {Routines(el, $, snap, status.tasks, now)}
+      </Box>
+
+      {Health(el, snap, now)}
+    </Box>
+  )
+}
+
 // ------------------------------------------------------------------ register
 export const register: Register = on => {
   let ticks = 0
   let selfId = ''
+  let paneDrawn = false
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -1032,278 +1316,27 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const snap = await read($, snapAtom)
-    const view = await read($, viewAtom)
-    const selected = await read($, selectedAtom)
-    const ask = await read($, askAtom)
-    const status = await read($, statusAtom)
-    const standupOpen = await read($, standupOpenAtom)
-    const summarizing = await read($, summarizingAtom)
-    const collapsed = await read($, collapsedAtom)
-    const reader = await read($, readerAtom)
-    const busyOne = await read($, resummarizingAtom)
-    const now = await $.clock.now()
-    // wide enough to read a conversation beside the timeline; else it takes the pane
-    const wide = e.surface === 'desktop' && e.props.bodyColumns >= WIDE
-
-    if (e.surface === 'mobile' || e.surface === 'vscode') {
-      const { Box, Text } = $.ui.resolve(e)
+    // a draw that throws shows its error here, with a way to retry, instead of the
+    // engine's blank "has not drawn"; the first good draw and any error go to the trace
+    try {
+      const drawn = await drawPane($, e, selfId)
+      if (!paneDrawn) {
+        paneDrawn = true
+        await breadcrumb($, { firstPaneDrawAt: await $.clock.now() })
+      }
+      return drawn
+    } catch (err) {
+      await breadcrumb($, { lastDrawError: errText(err), lastDrawErrorAt: await $.clock.now(),
+        lastDrawStack: String((err as Error)?.stack ?? '').slice(0, 2000) })
+      const { Box, Text, Button } = $.ui.resolve(e)
       return (
-        <Box flexDirection="column">
+        <Box flexDirection="column" gap={1}>
           <Text bold>{TITLE}</Text>
-          {(snap?.sessions ?? []).filter(s => !s.scheduled).slice(-20).map(s => (
-            <Text wrap="truncate-end">{`${hm(s.first, snap?.tzOffsetMin ?? 0)} ${s.project} · ${s.title}`}</Text>
-          ))}
-        </Box>
-      )
-    }
-
-    const el = $.ui.resolve(e) as unknown as El
-    const { Box, Text, Button, Select, Client } = el
-
-    if (!snap) {
-      return (
-        <Box flexDirection="column">
-          <Text bold>{TITLE}</Text>
-          {status.error
-            ? <Text color="#f85149" wrap="wrap">{`Couldn't collect the data: ${status.error}`}</Text>
-            : <Text dimColor>Collecting your conversations…</Text>}
+          <Text color="#f85149" wrap="wrap">{`Couldn't draw the pane: ${errText(err)}`}</Text>
           <Button key="refresh" label="Retry" onPress={() => { void refresh($) }} />
         </Box>
       )
     }
-
-    const tz = snap.tzOffsetMin
-    const pending = unsummarized(snap, selfId)
-    const t = timeline(snap, view, now)
-    const shown = inView(snap, view)
-    const filtered = Boolean(view.ws || view.kind)
-    // the filters' choices: what this range holds, most time first, and the current pick
-    const tally = (key: (s: McSession) => string | null) => {
-      const m = new Map<string, number>()
-      for (const s of snap.sessions) {
-        const k = s.scheduled ? null : key(s)
-        if (k) m.set(k, (m.get(k) ?? 0) + s.activeMin)
-      }
-      return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k)
-    }
-    const wsChoices = tally(s => s.workstream)
-    if (view.ws && !wsChoices.includes(view.ws)) wsChoices.push(view.ws)
-    const kindChoices = tally(s => s.kind)
-    if (view.kind && !kindChoices.includes(view.kind)) kindChoices.push(view.kind)
-    const sel = selected ? snap.sessions.find(s => s.id === selected) ?? null : null
-    const multiDay = snap.range.days.length > 1
-    const rows = rowsOptions(multiDay)
-    const pickDays = Array.from({ length: CUSTOM_DAYS }, (_, i) => dayAt(now, tz, i))
-    // older days come from `/mission YYYY-MM-DD..YYYY-MM-DD`: keep those picked
-    const pickWith = (v: string | undefined) => v && !pickDays.some(d => d.value === v)
-      ? [...pickDays, { value: v, label: v }] : pickDays
-    // axis + rows + a blank line before each heading but the first + blank + footer
-    // the terminal timeline's rows: axis, headings (a blank line before all but the
-    // first), the conversations of unfolded groups, then a blank line and the footer
-    let foldedNow = false
-    const visible = t.rows.filter(r => {
-      if (r.kind === 'header') {
-        foldedNow = collapsed.includes(r.label)
-        return true
-      }
-      return !foldedNow
-    }).length
-    const height = 1 + visible + t.rows.filter((r, i) => r.kind === 'header' && i > 0).length + 2
-    const groups = t.rows.filter(r => r.kind === 'header').map(r => r.label)
-    const allFolded = groups.length > 0 && groups.every(g => collapsed.includes(g))
-    const tl = { collapsed, rows: t.rows, hourFrom: t.hourFrom, hourTo: t.hourTo, ticks: t.ticks, now: t.now,
-      nowBase: t.nowBase, selected, order: t.order }
-    const readSession = reader ? snap.sessions.find(s => s.id === reader.id) ?? null : null
-
-    if (reader && !wide) {
-      // a narrow pane: the conversation takes it over, the way back on top
-      return (
-        <Box flexDirection="column" gap={1}>
-          <Box flexDirection="row" justifyContent="space-between">
-            <Button key="reader-back" label={`← ${TITLE} · ${snap.range.label}`} plain
-              onPress={() => { void closeReader($) }} />
-            <Text dimColor>{reader.loading ? 'reading…' : `updated ${hm(now, tz)}`}</Text>
-          </Box>
-          {Reader(el, $, reader, readSession, snap, now, selfId, busyOne)}
-        </Box>
-      )
-    }
-
-    return (
-      <Box flexDirection="column" gap={1}>
-        <Box flexDirection="column">
-          <Box flexDirection="row" justifyContent="space-between">
-            <Text bold>{`${TITLE} · ${snap.range.label}`}</Text>
-            <Box flexDirection="row" gap={1}>
-              <Text dimColor>{status.loading ? 'refreshing…' : `updated ${hm(snap.generatedAt, tz)}`}</Text>
-              <Button key="refresh" label="Refresh" hotkey="r" plain onPress={() => { void refresh($) }} />
-            </Box>
-          </Box>
-          <Box flexDirection="row" gap={2} alignItems="center" flexWrap="wrap">
-            <Text dimColor wrap="wrap">
-              {`${snap.totals.conversations} conversations · ${duration(snap.totals.activeMin)} active · ` +
-                `${snap.totals.projects} project${snap.totals.projects === 1 ? '' : 's'}`}
-            </Text>
-            {pending.length || summarizing
-              ? <Button key="summarize" plain variant="primary"
-                  label={summarizing ? 'Summarizing… (follow it in the conversation)'
-                    : `Summarize ${pending.length} now`}
-                  onPress={() => { void summarizeNow($) }} />
-              : <Text dimColor>· everything is summarized</Text>}
-          </Box>
-          {status.error ? <Text color="#f85149" wrap="wrap">{`Last refresh failed: ${status.error}`}</Text> : null}
-        </Box>
-
-        {Standup(el, $, snap, now, standupOpen)}
-
-        {Ask(el, $, ask, snap, view, e.surface)}
-
-        <Box flexDirection="row" gap={2} flexWrap="wrap">
-          <Select key="range" value={view.range}
-            options={[{ value: 'today', label: 'Today' }, { value: 'yesterday', label: 'Yesterday' },
-              { value: '7d', label: 'Last 7 days' }, { value: 'custom', label: 'Custom range…' }]}
-            onSelect={v => {
-              // a first custom range starts as the last two weeks
-              void setView($, v === 'custom' && !view.from
-                ? { range: 'custom', from: pickDays[13]!.value, to: pickDays[0]!.value }
-                : { range: v as McRangeKey })
-            }} />
-          {view.range === 'custom'
-            ? (
-              <Box key="custom-range" flexDirection="row" gap={1} alignItems="center">
-                <Text dimColor>From</Text>
-                <Select key="from" value={view.from ?? pickDays[13]!.value} options={pickWith(view.from)}
-                  onSelect={v => { void setView($, { from: v }) }} />
-                <Text dimColor>to</Text>
-                <Select key="to" value={view.to ?? pickDays[0]!.value} options={pickWith(view.to)}
-                  onSelect={v => { void setView($, { to: v }) }} />
-              </Box>
-            )
-            : null}
-          <Select key="rows" value={rows.some(r => r.value === view.rows) ? view.rows : 'project'}
-            options={rows} onSelect={v => { void setView($, { rows: v as McRowsMode }) }} />
-          {t.rows.some(r => r.kind === 'header')
-            ? <Button key="fold-all" plain dimColor label={allFolded ? '▾ Unfold all' : '▸ Fold all'}
-                onPress={() => { void update($, collapsedAtom, () => (allFolded ? [] : groups)) }} />
-            : null}
-          <Select key="filter-ws" value={view.ws ?? '*'}
-            options={[{ value: '*', label: 'All workstreams' }, ...wsChoices.slice(0, 60).map(n => ({ value: n, label: n }))]}
-            onSelect={v => { void setView($, { ws: v === '*' ? undefined : v }) }} />
-          <Select key="filter-kind" value={view.kind ?? '*'}
-            options={[{ value: '*', label: 'All kinds of work' }, ...kindChoices.map(k => ({ value: k, label: k }))]}
-            onSelect={v => { void setView($, { kind: v === '*' ? undefined : v as McKind }) }} />
-          {filtered
-            ? <Button key="filter-clear" label="Clear filters" plain dimColor
-                onPress={() => { void setView($, { ws: undefined, kind: undefined }) }} />
-            : null}
-          <Select key="color" value={view.color}
-            options={[{ value: 'project', label: 'Colour: project' }, { value: 'status', label: 'Colour: digest status' }]}
-            onSelect={v => { void setView($, { color: v as McColorMode }) }} />
-        </Box>
-
-        <Box flexDirection="row" gap={2} alignItems="flex-start">
-        <Box flexDirection="column" width={wide && reader ? '45%' : '100%'} flexShrink={0}>
-          <Text bold>Timeline</Text>
-          {filtered
-            ? <Text dimColor>{`Showing ${shown.length} of ${snap.totals.conversations} conversations · ` +
-                `${duration(workedMinutes(shown))} active` +
-                `${view.ws ? ` · ${view.ws}` : ''}${view.kind ? ` · ${view.kind}` : ''}`}</Text>
-            : null}
-          {e.surface === 'desktop'
-            ? (() => {
-              // the desktop draws vectors: each row is a clickable name beside its own
-              // small strip of bars, so the rows line up and a click opens the session
-              const { Svg } = $.ui.resolve(e)
-              // beside the reader the timeline has a bit under half the pane
-              const cols = wide && reader ? Math.floor(e.props.bodyColumns * 0.45) : e.props.bodyColumns
-              // the title matters more than the hours: it gets most of the row, whole
-              const labelCells = Math.max(30, Math.min(110, Math.floor(cols * 0.6)))
-              const stripPx = Math.max(160, (cols - labelCells - 2) * PX_PER_CELL)
-              const strips = timelineStrips(tl, stripPx)
-              return (
-                <Box flexDirection="column">
-                  <Box flexDirection="row">
-                    <Box width={labelCells} />
-                    <Box flexGrow={1}><Svg source={strips.axis} alt="Hours" /></Box>
-                  </Box>
-                  {t.rows.map((r, i) => {
-                    if (r.kind === 'header') {
-                      const isFolded = collapsed.includes(r.label)
-                      return (
-                        <Box key={`h-${i}`} flexDirection="column" marginTop={i ? 1 : 0}>
-                          <Box flexDirection="row" alignItems="center">
-                            <Box width={labelCells} flexDirection="row" overflow="hidden">
-                              <Button key={`fold-${i}`} plain label={`${isFolded ? '▸' : '▾'} ${r.label}`}
-                                onPress={() => { void toggleGroup($, r.label) }} />
-                            </Box>
-                            {isFolded && strips.rows[i]
-                              ? <Box flexGrow={1}><Svg source={strips.rows[i] as string} alt={`${r.label}, all conversations`} /></Box>
-                              : null}
-                          </Box>
-                          <Text dimColor wrap="truncate-end">{`  ${r.sub}`}</Text>
-                          {r.note && !isFolded ? <Text dimColor italic wrap="truncate-end">{`  ${r.note}`}</Text> : null}
-                        </Box>
-                      )
-                    }
-                    // a folded group hides its conversations
-                    const heading = [...t.rows.slice(0, i)].reverse().find(x => x.kind === 'header')
-                    if (heading && collapsed.includes(heading.label)) return null
-                    const dot = r.bars[0]?.color ?? '#8b949e'
-                    const isSel = r.id !== null && r.id === selected
-                    const convo = r.id
-                    const session = isSel ? snap.sessions.find(x => x.id === r.id) ?? null : null
-                    return (
-                      <Box key={`r-${i}`} flexDirection="column">
-                      <Box flexDirection="row" alignItems="center">
-                        <Box width={labelCells} flexDirection="row" overflow="hidden">
-                          {convo
-                            ? (
-                              <Box flexGrow={1} flexShrink={1} flexDirection="row">
-                                <Text color={dot}>{isSel ? '▸ ' : '● '}</Text>
-                                <Button key={`go-${convo}`} plain label={r.label}
-                                  onPress={() => {
-                                    // wide: read it beside the timeline; narrow: its gist under the row
-                                    void (wide ? openReader($, convo, true)
-                                      : update($, selectedAtom, cur => (cur === convo ? null : convo)))
-                                  }} />
-                              </Box>
-                            )
-                            : <Box flexGrow={1} flexShrink={1} overflow="hidden"><Text bold wrap="truncate-end">{r.label}</Text></Box>}
-                          <Box width={6} justifyContent="flex-end"><Text dimColor>{r.sub}</Text></Box>
-                        </Box>
-                        <Box flexGrow={1}><Svg source={strips.rows[i] ?? ''} alt={r.label} /></Box>
-                      </Box>
-                      {session && !wide ? Expanded(el, $, session, snap, now, dot, selfId, busyOne) : null}
-                      </Box>
-                    )
-                  })}
-                  <Text dimColor>{wide ? 'Click a conversation to read it here.'
-                    : 'Click a conversation to see what it was about, then read it or open it.'}</Text>
-                </Box>
-              )
-            })()
-            : <Client key="timeline" module="./timeline.tsx" props={tl} width="100%" height={height} />}
-          <Box flexDirection="row" gap={2} flexWrap="wrap">
-            {t.legend.map((l, i) => (
-              <Text><Text color={l.color}>■</Text>{` ${l.label}`}</Text>
-            ))}
-          </Box>
-        </Box>
-        {wide && reader
-          ? <Box flexGrow={1} flexShrink={1} width="55%">{Reader(el, $, reader, readSession, snap, now, selfId, busyOne)}</Box>
-          : null}
-        </Box>
-
-        {sel && e.surface !== 'desktop' ? Detail(el, $, sel, snap, now, selfId, busyOne) : null}
-
-        <Box flexDirection="column">
-          <Text bold>Routines</Text>
-          {Routines(el, $, snap, status.tasks, now)}
-        </Box>
-
-        {Health(el, snap, now)}
-      </Box>
-    )
   })
 }
+

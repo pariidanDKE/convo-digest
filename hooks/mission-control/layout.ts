@@ -187,6 +187,9 @@ function tip(s: McSession, tz: number): string {
     `${status} · ${s.title}`
 }
 
+/** The most conversations the timeline draws; the rest are counted, and a filter shows them. */
+export const MAX_ROWS = 80
+
 /** Where a conversation without a workstream or kind yet goes, last. */
 export const UNFILED = 'Not summarized yet'
 
@@ -210,6 +213,8 @@ const STATUS_ORDER = ['open', 'not summarized yet', 'exploratory', 'solved', 'ab
 /** Snapshot + view → everything the timeline Client draws, plus the legend. */
 export function timeline(snap: McSnapshot, view: McView, nowMs: number): McTimelineProps & {
   legend: { label: string; color: string }[]
+  /** conversations in the view not drawn, past MAX_ROWS */
+  hidden: number
 } {
   const tz = snap.tzOffsetMin
   const projects = projectColors(snap.sessions)
@@ -224,6 +229,7 @@ export function timeline(snap: McSnapshot, view: McView, nowMs: number): McTimel
   const byDay = multiDay && view.rows === 'day'
   const rows: McRow[] = []
   const minutes = (g: McSession[]) => workedMinutes(g)
+  let hidden = 0
 
   if (byDay) {
     // one row per day, the hours of the day across: when in the day you work
@@ -247,7 +253,15 @@ export function timeline(snap: McSnapshot, view: McView, nowMs: number): McTimel
         ? STATUS_ORDER.indexOf(a[0]) - STATUS_ORDER.indexOf(b[0])
         : a[0] === UNFILED ? 1 : b[0] === UNFILED ? -1 : minutes(b[1]) - minutes(a[1]))
     const described = new Map(snap.workstreams.map(w => [w.name, w.description]))
+    // at most MAX_ROWS conversations, whole groups at a time (the first group is always
+    // drawn, cut to the limit): a pane past a few hundred kilobytes is one the desktop
+    // won't draw at all, and a month of conversations gets there
+    let drawn = 0
     for (const [k, g] of ordered) {
+      if (drawn >= MAX_ROWS || (drawn > 0 && drawn + g.length > MAX_ROWS)) {
+        hidden += g.length
+        continue
+      }
       const note = view.rows === 'workstream' ? described.get(k) : null
       rows.push({ kind: 'header', label: k,
         sub: `${g.length} conversation${g.length > 1 ? 's' : ''} · ${duration(minutes(g))}`,
@@ -255,7 +269,12 @@ export function timeline(snap: McSnapshot, view: McView, nowMs: number): McTimel
         ...(note ? { note } : {}) })
       // the conversation you spent most time on first, in every grouping; ties by start
       for (const s of [...g].sort((a, b) => b.activeMin - a.activeMin || a.first - b.first)) {
+        if (drawn >= MAX_ROWS) {
+          hidden += 1
+          continue
+        }
         rows.push({ kind: 'track', label: s.title, sub: duration(s.activeMin), base, id: s.id, bars: [bar(s)] })
+        drawn += 1
       }
     }
   }
@@ -299,7 +318,7 @@ export function timeline(snap: McSnapshot, view: McView, nowMs: number): McTimel
   // keyboard order: the conversation rows top to bottom, as drawn
   const order = tracks.filter(r => r.id).map(r => r.id as string)
   return { rows, hourFrom, hourTo, ticks, now: isToday ? nowMs : null, nowBase, selected: null,
-    order, collapsed: [], legend: legend(snap, view) }
+    order, collapsed: [], legend: legend(snap, view), hidden }
 }
 
 // ---------------------------------------------------------------- timeline as a picture
@@ -333,11 +352,22 @@ export function timelineStrips(t: McTimelineProps, width: number): { axis: strin
   const svg = (h: number, body: string) =>
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${h}" viewBox="0 0 ${W} ${h}" ` +
     `font-family="-apple-system, BlinkMacSystemFont, Helvetica, sans-serif">${body}</svg>`
-  const grid = (h: number) => t.ticks.map(tick => {
-    const x = xHour(tick.at).toFixed(1)
-    return `<line x1="${x}" y1="0" x2="${x}" y2="${h}" stroke="${GRID}" stroke-opacity="0.18"/>`
-  }).join('') + (multiDay ? t.ticks.map((tick, i) => i % 2 ? '' :
-    `<rect x="${xHour(tick.at).toFixed(1)}" y="0" width="${dayW.toFixed(1)}" height="${h}" fill="${GRID}" fill-opacity="0.06"/>`).join('') : '')
+  // the guide lines, and across days the alternate-day shading, as one repeating pattern:
+  // a few hundred characters per strip however many days or hours it spans. Drawn as
+  // separate lines and boxes they ran to ~4k characters a strip, and a month of
+  // conversations to a pane too large for the desktop to draw at all.
+  const grid = (h: number) => {
+    if (t.ticks.length < 2) return ''
+    const x0 = xHour(t.ticks[0]!.at)
+    const step = xHour(t.ticks[1]!.at) - x0
+    const line = (x: number) =>
+      `<line x1="${x.toFixed(1)}" y1="0" x2="${x.toFixed(1)}" y2="${h}" stroke="${GRID}" stroke-opacity="0.18"/>`
+    const tile = multiDay
+      ? `<rect width="${step.toFixed(2)}" height="${h}" fill="${GRID}" fill-opacity="0.06"/>${line(0.5)}${line(step + 0.5)}`
+      : line(0.5)
+    return `<defs><pattern id="g" x="${x0.toFixed(2)}" y="0" width="${(multiDay ? 2 * step : step).toFixed(2)}" ` +
+      `height="${h}" patternUnits="userSpaceOnUse">${tile}</pattern></defs><rect width="${W}" height="${h}" fill="url(#g)"/>`
+  }
 
   // a long range has narrow days: label every few so the labels don't run together
   const labelEvery = multiDay ? Math.max(1, Math.ceil(48 / dayW)) : 1

@@ -4,7 +4,7 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { timeline, workedMinutes } from '../hooks/mission-control/layout'
+import { MAX_ROWS, timeline, workedMinutes } from '../hooks/mission-control/layout'
 import type { McSession, McSnapshot } from '../types'
 
 const TZ = 120                                         // CEST
@@ -380,6 +380,19 @@ describe('mission control', () => {
     await band.unmount()
   })
 
+  test('a pane that fails to draw says why, with a retry, instead of drawing nothing', async ($, on) => {
+    // data the drawing can't handle: no sessions list
+    world(on, { snap: { ...SNAP, sessions: null as unknown as McSession[] } })
+    await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'mission', args: '', origin: { kind: 'composer' },
+      presentation: { isFullscreen: true, columns: 160 } })
+    const ui = await $.ui.mount({ plugin: 'convo-digest', surface: 'desktop', component: 'Pane',
+      requestId: 'mission-control', props: PANE_PROPS, viewport: { columns: 120, rows: 80 } })
+    expect(await ui.find({ text: /Couldn't draw the pane/ })).toBeDefined()
+    expect(await ui.find({ key: 'refresh', text: /Retry/ })).toBeDefined()
+    await ui.unmount()
+  })
+
   test('the status line is empty while all is well, and names only what failed', async ($, on) => {
     const quiet = world(on)
     await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
@@ -682,6 +695,17 @@ describe('layout', () => {
       const t = timeline(snap, { range: 'today', rows, color: 'project' }, at(15))
       expect(t.order).toEqual(['long', 'mid', 'short'])
     }
+  })
+
+  test('a long range draws at most MAX_ROWS conversations, the most time first, and counts the rest', async () => {
+    const many = Array.from({ length: MAX_ROWS + 25 }, (_, i) => session(`c${i}`, {
+      title: `Conversation ${i}`, activeMin: i + 1, segments: [[at(9), at(9, 30)]],
+      workstream: i % 2 ? 'Even work' : 'Odd work' }))
+    const t = timeline({ ...SNAP, sessions: many }, { range: 'today', rows: 'workstream', color: 'project' }, at(11))
+    expect(t.order.length).toBeLessThanOrEqual(MAX_ROWS)
+    expect(t.order.length + t.hidden).toBe(MAX_ROWS + 25)
+    // the conversation with the most time is drawn
+    expect(t.order).toContain(`c${MAX_ROWS + 24}`)
   })
 
   test('a heading counts conversations that ran side by side once', async () => {
