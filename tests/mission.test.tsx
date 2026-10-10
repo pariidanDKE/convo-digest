@@ -4,7 +4,7 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { timeline, workedMinutes } from '../hooks/mission-control/layout'
+import { MAX_ROWS, timeline, workedMinutes } from '../hooks/mission-control/layout'
 import type { McSession, McSnapshot } from '../types'
 
 const TZ = 120                                         // CEST
@@ -695,6 +695,17 @@ describe('layout', () => {
       const t = timeline(snap, { range: 'today', rows, color: 'project' }, at(15))
       expect(t.order).toEqual(['long', 'mid', 'short'])
     }
+  })
+
+  test('a long range draws at most MAX_ROWS conversations, the most time first, and counts the rest', async () => {
+    const many = Array.from({ length: MAX_ROWS + 25 }, (_, i) => session(`c${i}`, {
+      title: `Conversation ${i}`, activeMin: i + 1, segments: [[at(9), at(9, 30)]],
+      workstream: i % 2 ? 'Even work' : 'Odd work' }))
+    const t = timeline({ ...SNAP, sessions: many }, { range: 'today', rows: 'workstream', color: 'project' }, at(11))
+    expect(t.order.length).toBeLessThanOrEqual(MAX_ROWS)
+    expect(t.order.length + t.hidden).toBe(MAX_ROWS + 25)
+    // the conversation with the most time is drawn
+    expect(t.order).toContain(`c${MAX_ROWS + 24}`)
   })
 
   test('a heading counts conversations that ran side by side once', async () => {

@@ -1054,6 +1054,10 @@ async function drawPane($: $T, e: PaneRender, selfId: string) {
       <Box flexDirection="row" gap={2} alignItems="flex-start">
       <Box flexDirection="column" width={wide && reader ? '45%' : '100%'} flexShrink={0}>
         <Text bold>Timeline</Text>
+        {t.hidden
+          ? <Text dimColor wrap="wrap">{`Drawing the ${shown.length - t.hidden} conversations with the most time; ` +
+              `${t.hidden} more in this view. Pick a workstream or a kind of work to see them.`}</Text>
+          : null}
         {filtered
           ? <Text dimColor>{`Showing ${shown.length} of ${snap.totals.conversations} conversations · ` +
               `${duration(workedMinutes(shown))} active` +
