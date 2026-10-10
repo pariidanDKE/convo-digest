@@ -380,6 +380,19 @@ describe('mission control', () => {
     await band.unmount()
   })
 
+  test('a pane that fails to draw says why, with a retry, instead of drawing nothing', async ($, on) => {
+    // data the drawing can't handle: no sessions list
+    world(on, { snap: { ...SNAP, sessions: null as unknown as McSession[] } })
+    await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })
+    await $.command.run({ command: 'mission', args: '', origin: { kind: 'composer' },
+      presentation: { isFullscreen: true, columns: 160 } })
+    const ui = await $.ui.mount({ plugin: 'convo-digest', surface: 'desktop', component: 'Pane',
+      requestId: 'mission-control', props: PANE_PROPS, viewport: { columns: 120, rows: 80 } })
+    expect(await ui.find({ text: /Couldn't draw the pane/ })).toBeDefined()
+    expect(await ui.find({ key: 'refresh', text: /Retry/ })).toBeDefined()
+    await ui.unmount()
+  })
+
   test('the status line is empty while all is well, and names only what failed', async ($, on) => {
     const quiet = world(on)
     await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: true })

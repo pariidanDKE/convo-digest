@@ -1,7 +1,7 @@
 {
   "name": "convo-digest",
   "description": "Summarize your finished Claude Code conversations into a searchable recall index, surface relevant past work when you start something new, and see it all in Mission Control: a pane with your standup, an Ask bar, and a timeline grouped by workstream. Runs locally on your Claude Code subscription; no API key.",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "author": {
     "name": "Dan"
   },
